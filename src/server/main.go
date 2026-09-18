@@ -65,12 +65,18 @@ func main() {
 	}
 	go app.hub.Run()
 
+	chunks := newChunkedUploads(filepath.Join(*dataDir, "tmp"), app)
+
 	pages, source := webAssets(*webDir)
 	version := assetsVersion(pages)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", app.handleWS)
 	mux.HandleFunc("/api/upload", app.handleUpload)
+	mux.HandleFunc("/api/upload/init", chunks.handleInit)
+	mux.HandleFunc("/api/upload/status", chunks.handleStatus)
+	mux.HandleFunc("/api/upload/chunk", chunks.handleChunk)
+	mux.HandleFunc("/api/upload/complete", chunks.handleComplete)
 	mux.HandleFunc("/api/files/", app.handleFile)
 	mux.HandleFunc("/api/reveal/", app.handleReveal)
 	mux.Handle("/", staticHandler(pages, version))

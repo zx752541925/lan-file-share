@@ -47,6 +47,10 @@ go run ./src/server -addr :41731 -max-mb 8192 -web ./src/web -data ./data
 | `GET /api/files/{会话ID}/{文件ID}` | 在线预览，支持 Range 断点续传 |
 | `GET /api/files/{会话ID}/{文件ID}/download` | 带文件名下载（中文名用 RFC 5987 编码） |
 | `GET /api/reveal/{会话ID}/{文件ID}?host=口令` | 仅主机：在系统文件管理器里定位该文件 |
+| `POST /api/upload/init` | 大文件分片上传：返回上传 ID 与分片大小（8MB）|
+| `GET /api/upload/status?uploadId=` | 查询已收到的分片序号，用于断点续传 |
+| `PUT /api/upload/chunk?uploadId=&index=` | 上传单个分片，可重复提交（幂等）|
+| `POST /api/upload/complete` | 合并分片为正式文件，建消息并广播 |
 
 ## 手机打不开？
 
@@ -101,6 +105,15 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 - 主机不需要下载：文件卡片对主机显示「打开」和「定位」（定位会在资源管理器中选中该文件），
   图片、视频、音频在所有设备上都内联预览，其他设备下载时按原始文件名返回
 - 所有文件只存在主机磁盘上，其他设备只在浏览时放进浏览器缓存
+
+## 断点续传
+
+- 大于 8MB 的文件自动走分片上传，小文件仍是一次传完
+- 切网、闪断、锁屏、切后台：前端自动重试并按已确认的分片继续，用户无感
+- 页面刷新/关闭后：分片留在 `data/tmp/<上传ID>/`（保留 24 小时），
+  重新打开页面会提示「有未完成的上传」，重新选择同一个文件即从断点继续
+  （浏览器刷新后拿不到原文件对象，这是浏览器限制，只能重新选一次）
+- 同一分片可重复提交（幂等），合并前会校验总字节数是否与文件大小一致
 
 ## 环境变量
 

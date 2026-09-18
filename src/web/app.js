@@ -498,6 +498,17 @@ function renderUploads() {
     .join('');
 }
 
+// 上次没传完的分片上传：提示用户重新选同一个文件即可继续
+function notifyPendingUploads() {
+  const pending = Object.keys(localStorage).filter((key) => key.startsWith(UPLOAD_PREFIX));
+  if (!pending.length) return;
+
+  const record = JSON.parse(localStorage.getItem(pending[0]) || 'null');
+  if (!record?.name) return;
+  const percent = record.percent ? `，已完成 ${record.percent}%` : '';
+  showToast(`有未完成的上传：${record.name}${percent}，重新选择同一文件可继续`);
+}
+
 function renderSessions() {
   if (!state.sessions.length) {
     el.sessionList.innerHTML = '<li class="empty-tip">还没有历史会话</li>';
@@ -704,10 +715,23 @@ function handleFiles(fileList) {
   files.forEach((file, index) => uploadFile(file, index === 0 ? caption : ''));
 }
 
+// 大于这个大小走分片上传，支持切网/刷新后续传；小文件一次传完更省事
+const CHUNK_THRESHOLD = 8 * 1024 * 1024;
+const UPLOAD_PREFIX = 'lanfile.up.';
+
+function uploadKey(file) {
+  return `${UPLOAD_PREFIX}${file.name.length}-${file.size}-${file.lastModified}`;
+}
+
 function uploadFile(file, caption) {
-  const item = { key: `${Date.now()}-${Math.random()}`, name: file.name, percent: 0 };
+  const item = { key: `${Date.now()}-${Math.random()}`, name: file.name, percent: 0, resuming: false };
   state.uploads.push(item);
   renderUploads();
+
+  if (file.size > CHUNK_THRESHOLD) {
+    uploadInChunks(file, caption, item).catch(() => {});
+    return;
+  }
 
   const form = new FormData();
   form.append('text', caption);
@@ -747,6 +771,132 @@ function uploadFile(file, caption) {
     finishUpload(item);
   });
   xhr.send(form);
+}
+
+// 分片上传：每片 8MB，逐片确认，中断后可以从已确认的位置继续
+async function uploadInChunks(file, caption, item) {
+  const key = uploadKey(file);
+  let uploadId = '';
+  let received = new Set();
+
+  // 先看看有没有上次没传完的
+  const saved = JSON.parse(localStorage.getItem(key) || 'null');
+  if (saved?.uploadId) {
+    try {
+      const res = await fetch(`/api/upload/status?uploadId=${encodeURIComponent(saved.uploadId)}`);
+      if (res.ok) {
+        uploadId = saved.uploadId;
+        received = new Set((await res.json()).received || []);
+        item.resuming = received.size > 0;
+      }
+    } catch {}
+  }
+
+  if (!uploadId) {
+    const res = await fetch('/api/upload/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, size: file.size }),
+    });
+    if (!res.ok) {
+      failUpload(item, '初始化上传失败');
+      return;
+    }
+    const data = await res.json();
+    uploadId = data.uploadId;
+    localStorage.setItem(key, JSON.stringify({ uploadId, name: file.name, size: file.size }));
+  }
+
+  const total = Math.max(1, Math.ceil(file.size / CHUNK_THRESHOLD));
+  const applyProgress = (index, loaded) => {
+    const done = index * CHUNK_THRESHOLD + loaded;
+    item.percent = Math.min(99, Math.round((done / file.size) * 100));
+    renderUploads();
+  };
+
+  for (let index = 0; index < total; index += 1) {
+    if (received.has(index)) {
+      applyProgress(index, CHUNK_THRESHOLD);
+      continue;
+    }
+
+    const blob = file.slice(index * CHUNK_THRESHOLD, Math.min((index + 1) * CHUNK_THRESHOLD, file.size));
+    const ok = await putChunk(uploadId, index, blob, (loaded) => applyProgress(index, loaded));
+    if (!ok) {
+      // 分片留在服务器上，下次（或重新选同一个文件）可以接着传
+      localStorage.setItem(
+        key,
+        JSON.stringify({ uploadId, name: file.name, size: file.size, percent: item.percent })
+      );
+      failUpload(item, `上传中断，已完成 ${item.percent}%，重选同一文件可继续`);
+      return;
+    }
+  }
+
+  item.percent = 100;
+  renderUploads();
+
+  try {
+    const res = await fetch('/api/upload/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploadId, text: caption, name: state.name || '', clientId: state.clientId }),
+    });
+    const meta = await res.json();
+    if (!res.ok) {
+      failUpload(item, meta?.error || '合并文件失败');
+      return;
+    }
+    localStorage.removeItem(key);
+    if (!state.files.some((entry) => entry.id === meta.id)) {
+      state.files.push(meta);
+      renderFiles();
+    }
+    if (socket?.readyState !== WebSocket.OPEN) showToast('文件已上传，消息会在重连后同步');
+  } catch {
+    failUpload(item, '合并文件失败，可重试');
+    return;
+  }
+
+  finishUpload(item);
+}
+
+// putChunk 上传单个分片，失败自动重试（指数退避）
+function putChunk(uploadId, index, blob, onProgress, attempt = 1) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `/api/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}`);
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    });
+
+    const retry = () => {
+      if (attempt >= 5) {
+        resolve(false);
+        return;
+      }
+      setTimeout(() => {
+        putChunk(uploadId, index, blob, onProgress, attempt + 1).then(resolve);
+      }, 500 * 2 ** (attempt - 1));
+    };
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 200) {
+        onProgress(blob.size);
+        resolve(true);
+      } else {
+        retry();
+      }
+    });
+    xhr.addEventListener('error', retry);
+    xhr.addEventListener('timeout', retry);
+    xhr.send(blob);
+  });
+}
+
+function failUpload(item, message) {
+  showToast(message);
+  finishUpload(item);
 }
 
 function finishUpload(item) {
@@ -882,3 +1032,4 @@ el.userAvatar.className = `avatar ${avatarClass(state.clientId)}`;
 applyFilesLayout();
 renderAll();
 connect();
+notifyPendingUploads();
