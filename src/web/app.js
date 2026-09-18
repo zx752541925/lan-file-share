@@ -223,6 +223,69 @@ async function revealFile(file) {
   }
 }
 
+/* ---------------- 音量增强：浏览器里播放偏小时，用 Web Audio 放大 2 倍 ---------------- */
+
+const BOOST_KEY = 'lanfile.boost';
+let boostOn = localStorage.getItem(BOOST_KEY) !== 'off';
+let audioCtx = null;
+const boostedMedia = new WeakMap(); // 媒体元素 -> GainNode（同一元素只能接入一次）
+
+const boostLabel = () => (boostOn ? '音量 ×2' : '音量 原声');
+
+// 视频/音频块：媒体本体 + 一个全局生效的音量增强开关
+function mediaBlock(mediaHtml, file) {
+  return `<div class="media-block">
+      ${mediaHtml}
+      <button type="button" class="media-boost${boostOn ? ' on' : ''}" data-boost="${esc(file.id)}">${boostLabel()}</button>
+    </div>`;
+}
+
+// 把媒体元素接进 Web Audio 放大音量；元素自身的音量滑块仍然生效
+function boostMedia(media) {
+  if (!boostOn) return;
+  if (!media.isConnected) return; // 重新渲染后留下的旧元素不接入，避免音频图堆积
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!audioCtx) audioCtx = new Ctx();
+    audioCtx.resume?.();
+
+    let gain = boostedMedia.get(media);
+    if (!gain) {
+      gain = audioCtx.createGain();
+      audioCtx.createMediaElementSource(media).connect(gain).connect(audioCtx.destination);
+      boostedMedia.set(media, gain);
+    }
+    gain.gain.value = 2;
+  } catch {
+    // 浏览器不支持 Web Audio，或该元素已接入过音频图：保持原音量播放
+  }
+}
+
+function applyBoost() {
+  localStorage.setItem(BOOST_KEY, boostOn ? 'on' : 'off');
+
+  for (const media of document.querySelectorAll('video, audio')) {
+    const gain = boostedMedia.get(media);
+    if (gain) gain.gain.value = boostOn ? 2 : 1;
+    else if (boostOn) boostMedia(media);
+  }
+  for (const button of document.querySelectorAll('[data-boost]')) {
+    button.textContent = boostLabel();
+    button.classList.toggle('on', boostOn);
+  }
+}
+
+// play 事件不冒泡，用捕获阶段监听：一开始播放就接入，用户无需先点开关
+document.addEventListener(
+  'play',
+  (event) => {
+    const media = event.target;
+    if (media.tagName === 'VIDEO' || media.tagName === 'AUDIO') boostMedia(media);
+  },
+  true
+);
+
 /* ---------------- 文件面板：PC 折叠 / 手机抽屉 ---------------- */
 
 const FILES_KEY = 'lanfile.files';
@@ -431,11 +494,17 @@ function renderMessages() {
           );
         } else if (isVideo(file)) {
           parts.push(
-            `<video class="msg-video" src="${esc(url.file(state.session.id, file.id))}" controls preload="metadata" playsinline></video>`
+            mediaBlock(
+              `<video class="msg-video" src="${esc(url.file(state.session.id, file.id))}" controls preload="metadata" playsinline></video>`,
+              file
+            )
           );
         } else if (isAudio(file)) {
           parts.push(
-            `<audio class="msg-audio" src="${esc(url.file(state.session.id, file.id))}" controls preload="metadata"></audio>`
+            mediaBlock(
+              `<audio class="msg-audio" src="${esc(url.file(state.session.id, file.id))}" controls preload="metadata"></audio>`,
+              file
+            )
           );
         } else {
           parts.push(`<div class="file-card" data-file="${esc(file.id)}">
@@ -987,6 +1056,15 @@ el.fileList.addEventListener('click', (event) => {
 
 document.addEventListener('click', (event) => {
   if (event.target.closest('#fileList')) return; // 文件列表面板有自己的处理
+
+  const boost = event.target.closest('[data-boost]');
+  if (boost) {
+    event.stopPropagation();
+    boostOn = !boostOn;
+    applyBoost();
+    showToast(boostOn ? '音量已增强 ×2' : '音量已还原为原始大小');
+    return;
+  }
 
   const reveal = event.target.closest('[data-reveal]');
   if (reveal) {

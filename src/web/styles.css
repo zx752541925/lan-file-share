@@ -509,6 +509,32 @@ body.files-open .panel-files { transform: none; }
   height: 40px;
 }
 
+/* 视频/音频块：媒体下方跟一个音量增强开关 */
+.media-block {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.media-boost {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.media-boost.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .card-btn {
   flex: none;
   padding: 4px 9px;
@@ -886,10 +912,11 @@ body.files-open .panel-files { transform: none; }
   .app[data-files="collapsed"] .panel-files .panel-toggle { order: -1; }
   .app[data-files="collapsed"] .panel-files .panel-head h2 {
     writing-mode: horizontal-tb;
-    letter-spacing: 1px;
+    white-space: nowrap;
+    letter-spacing: 0.5px;
     font-size: 12px;
-    font-weight: 500;
-    color: var(--muted);
+    font-weight: 700;
+    color: var(--text);
     text-align: center;
   }
   .app[data-files="collapsed"] .panel-files .badge { font-size: 11px; padding: 2px 7px; }
