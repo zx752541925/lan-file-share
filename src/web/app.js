@@ -98,6 +98,36 @@ if (/^我的(电脑|手机)-[0-9A-F]{2}$/.test(state.name)) {
 const esc = (value) =>
   String(value).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
+// 网址识别：只认 http/https 与 www. 开头，转义后再拼成 <a>，避免 XSS。
+// 中日韩文字与全角标点不算网址内容，"打开https://a.com就行" 里网址到 .com 为止。
+const urlPattern = /(https?:\/\/[^\s<>"'\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+|www\.[^\s<>"'\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+)/gi;
+// 中文标点通常紧跟在网址后面，属于句子而不是链接的一部分
+const urlTailPattern = /[.,;:!?)\]}>。，、；：！？）】》」』"']+$/;
+
+function linkify(value) {
+  return String(value)
+    .split(urlPattern)
+    .map((part, index) => {
+      if (index % 2 === 0) return esc(part);
+
+      let url = part.replace(urlTailPattern, '');
+      let tail = part.slice(url.length);
+      // 括号成对时把右括号还给网址，如 .../wiki/A_(b)
+      const open = (url.match(/\(/g) || []).length;
+      const close = (url.match(/\)/g) || []).length;
+      if (close < open && tail.startsWith(')')) {
+        url += ')';
+        tail = tail.slice(1);
+      }
+      // 去掉结尾标点后剩下的不构成网址（如只有 "https://"），按纯文本处理
+      if (!url.replace(/^(https?:\/\/|www\.)/i, '')) return esc(part);
+
+      const href = /^www\./i.test(url) ? `https://${url}` : url;
+      return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>${esc(tail)}`;
+    })
+    .join('');
+}
+
 const formatSize = (bytes) => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -382,7 +412,7 @@ function renderMessages() {
         (Boolean(state.name) && msg.name === state.name);
       const parts = [];
 
-      if (msg.text) parts.push(`<div class="bubble">${esc(msg.text)}</div>`);
+      if (msg.text) parts.push(`<div class="bubble">${linkify(msg.text)}</div>`);
 
       if (msg.file) {
         const file = msg.file;

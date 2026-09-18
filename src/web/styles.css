@@ -438,6 +438,18 @@ body.files-open .panel-files { transform: none; }
   border-bottom-right-radius: 5px;
 }
 
+/* 消息里的网址：两种气泡底色下都可见，长链接不撑破手机窄屏 */
+.bubble a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.msg.theirs .bubble a { color: var(--accent); }
+
+.bubble a:active { opacity: 0.7; }
+
 .msg.theirs .bubble { border-bottom-left-radius: 5px; }
 .bubble + .bubble, .bubble + .file-card, .file-card + .bubble { margin-top: 6px; }
 
