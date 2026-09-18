@@ -80,6 +80,7 @@ const state = {
   connected: false,
   session: null,
   sessions: [],
+  files: [],
   lan: [],
   qrUrl: '',
   messages: [],
@@ -260,6 +261,7 @@ function connect() {
         state.peers = data.peers || 1;
         state.session = data.session;
         state.messages = data.history || [];
+        state.files = data.files || [];
         state.lan = data.lan || [];
         state.qrUrl = '';
         if (!state.name && data.name) adoptName(data.name);
@@ -274,6 +276,9 @@ function connect() {
 
       case 'message':
         state.messages.push(data.message);
+        if (data.message.file && !state.files.some((file) => file.id === data.message.file.id)) {
+          state.files.push(data.message.file);
+        }
         renderAll();
         break;
 
@@ -281,6 +286,7 @@ function connect() {
         for (const msg of state.messages) {
           if (msg.file?.id === data.fileId) msg.file.deleted = true;
         }
+        state.files = state.files.filter((file) => file.id !== data.fileId);
         renderAll();
         showToast('文件已删除');
         break;
@@ -298,6 +304,7 @@ function connect() {
       case 'session':
         state.session = data.session;
         state.messages = data.history || [];
+        state.files = data.files || [];
         if (keepModalsOpen) keepModalsOpen = false;
         else closeModals();
         renderAll();
@@ -401,9 +408,8 @@ function renderMessages() {
 }
 
 function renderFiles() {
-  const files = state.messages
-    .filter((msg) => msg.file && !msg.file.deleted)
-    .map((msg) => ({ ...msg.file, from: msg.name }));
+  // 以服务端下发的文件清单为准（不依赖聊天消息，孤儿文件也能看到）
+  const files = state.files.filter((file) => !file.deleted);
 
   el.fileCount.textContent = `${files.length} 个`;
   el.fileCountBadge.textContent = String(files.length);
@@ -419,7 +425,7 @@ function renderFiles() {
           ${thumbHtml(file)}
           <span class="file-meta">
             <span class="file-name">${esc(file.name)}</span>
-            <span class="file-sub">${formatSize(file.size)} · 来自 ${esc(file.from)}</span>
+            <span class="file-sub">${formatSize(file.size)}${file.from ? ` · 来自 ${esc(file.from)}` : ''}</span>
           </span>
           ${
             state.host
@@ -663,6 +669,9 @@ function uploadFile(file, caption) {
   renderUploads();
 
   const form = new FormData();
+  form.append('text', caption);
+  form.append('name', state.name || '');
+  form.append('clientId', state.clientId);
   form.append('file', file, file.name);
 
   const xhr = new XMLHttpRequest();
@@ -675,7 +684,14 @@ function uploadFile(file, caption) {
   xhr.addEventListener('load', () => {
     if (xhr.status === 200) {
       const meta = JSON.parse(xhr.responseText);
-      send({ type: 'chat', text: caption, fileId: meta.id });
+      // 服务端已经建好消息并广播；这里做一次本地兜底，断线时也能立刻看到文件
+      if (!state.files.some((item) => item.id === meta.id)) {
+        state.files.push(meta);
+        renderFiles();
+      }
+      if (socket?.readyState !== WebSocket.OPEN) {
+        showToast('文件已上传，消息会在重连后同步');
+      }
     } else {
       let reason = `HTTP ${xhr.status}`;
       try {

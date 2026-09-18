@@ -29,6 +29,7 @@ type Event struct {
 	History  []Message     `json:"history"`
 	Sessions []SessionInfo `json:"sessions,omitempty"`
 	LAN      []LANAddress  `json:"lan,omitempty"`
+	Files    []FileMeta    `json:"files,omitempty"`
 	Message  *Message      `json:"message,omitempty"`
 	FileID   string        `json:"fileId,omitempty"`
 }
@@ -99,6 +100,7 @@ func (a *App) serveClient(client *Client) {
 		Peers:   a.hub.Count(),
 		Session: a.sessions.Info(session),
 		History: a.sessions.Messages(session),
+		Files:   a.sessions.Files(session),
 		LAN:     a.lanAddresses(),
 	})
 
@@ -231,6 +233,7 @@ func (a *App) handleSwitch(incoming Incoming) {
 		Type:    "session",
 		Session: a.sessions.Info(session),
 		History: a.sessions.Messages(session),
+		Files:   a.sessions.Files(session),
 	})
 }
 
@@ -261,6 +264,7 @@ func (a *App) handleDeleteSession(sessionID string) {
 			Type:    "session",
 			Session: a.sessions.Info(replacement),
 			History: a.sessions.Messages(replacement),
+			Files:   a.sessions.Files(replacement),
 		})
 	}
 
@@ -292,19 +296,14 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 限制请求体大小，超限时读取会直接报错
 	r.Body = http.MaxBytesReader(w, r.Body, a.maxUpload)
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件过大或表单解析失败"})
-		return
-	}
-	defer func() { _ = r.MultipartForm.RemoveAll() }()
 
-	src, header, err := r.FormFile("file")
+	reader, err := r.MultipartReader()
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少文件字段 file"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return
 	}
-	defer func() { _ = src.Close() }()
 
 	// 文件存进当前会话的 uploads/，会话目录在此刻才真正创建
 	session := a.sessions.Current()
@@ -313,28 +312,105 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	saved := filepath.Join(a.sessions.UploadsDir(session), newID())
-	dst, err := os.Create(saved)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入文件失败"})
+	var (
+		meta      FileMeta
+		savedPath string
+		caption   string
+		sender    string
+		clientID  string
+	)
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = os.Remove(savedPath)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件过大或上传中断"})
+			return
+		}
+
+		switch part.FormName() {
+		case "file":
+			if meta.ID != "" { // 只接受一个文件
+				_ = part.Close()
+				continue
+			}
+
+			name := part.FileName()
+			fileID := newID()
+			savedPath = filepath.Join(a.sessions.UploadsDir(session), fileID)
+
+			dst, err := os.Create(savedPath)
+			if err != nil {
+				_ = part.Close()
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入文件失败"})
+				return
+			}
+
+			// 边收边写，不经过临时文件和内存缓冲
+			size, copyErr := io.CopyBuffer(dst, part, make([]byte, 512<<10))
+			closeErr := dst.Close()
+			_ = part.Close()
+			if copyErr != nil || closeErr != nil {
+				_ = os.Remove(savedPath)
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "文件过大或上传中断"})
+				return
+			}
+
+			meta = FileMeta{
+				ID:   fileID,
+				Name: cleanFileName(name),
+				Size: size,
+				Type: sniffType(savedPath, name, part.Header.Get("Content-Type")),
+			}
+
+		case "text":
+			raw, _ := io.ReadAll(io.LimitReader(part, 4096))
+			caption = strings.TrimSpace(string(raw))
+			_ = part.Close()
+
+		case "name":
+			raw, _ := io.ReadAll(io.LimitReader(part, 256))
+			sender = cleanName(string(raw))
+			_ = part.Close()
+
+		case "clientId":
+			raw, _ := io.ReadAll(io.LimitReader(part, 128))
+			if id := strings.TrimSpace(string(raw)); isClientID(id) {
+				clientID = id
+			}
+			_ = part.Close()
+
+		default:
+			_ = part.Close()
+		}
+	}
+
+	if meta.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少文件字段 file"})
 		return
 	}
 
-	size, copyErr := io.Copy(dst, src)
-	closeErr := dst.Close()
-	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(saved)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存文件失败"})
-		return
+	if clientID == "" {
+		clientID = newID()
 	}
-
-	meta := FileMeta{
-		ID:   filepath.Base(saved),
-		Name: cleanFileName(header.Filename),
-		Size: size,
-		Type: sniffType(saved, header.Filename, header.Header.Get("Content-Type")),
-	}
+	meta.From = sender
 	a.sessions.AddFile(meta)
+
+	// 上传即建消息并广播：不依赖 WebSocket 是否在线，断线也不会丢
+	message := Message{
+		ID:       newID(),
+		ClientID: clientID,
+		Name:     sender,
+		TS:       time.Now().UnixMilli(),
+		Text:     caption,
+		File:     &meta,
+	}
+	a.sessions.AddMessage(message)
+	a.broadcast(Event{Type: "message", Message: &message})
+
 	writeJSON(w, http.StatusOK, meta)
 }
 

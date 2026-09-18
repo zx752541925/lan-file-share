@@ -20,6 +20,7 @@ type FileMeta struct {
 	Name    string `json:"name"`
 	Size    int64  `json:"size"`
 	Type    string `json:"type"`
+	From    string `json:"from,omitempty"`
 	Deleted bool   `json:"deleted,omitempty"`
 }
 
@@ -287,6 +288,20 @@ func (m *Manager) File(sessionID, fileID string) (FileMeta, bool) {
 	}
 	file, ok := session.fileIndex[fileID]
 	return file, ok
+}
+
+// Files 返回会话里未被删除的文件（文件列表以此为准，不依赖聊天消息）。
+func (m *Manager) Files(session *Session) []FileMeta {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	files := make([]FileMeta, 0, len(session.Files))
+	for _, file := range session.Files {
+		if !file.Deleted {
+			files = append(files, file)
+		}
+	}
+	return files
 }
 
 // DeleteSession 删除整个会话目录（含里面的文件）。
