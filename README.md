@@ -42,7 +42,7 @@ go run ./src/server -addr :41731 -max-mb 8192 -web ./src/web -data ./data
 
 | 接口 | 说明 |
 | --- | --- |
-| `GET /ws` | WebSocket：`init`（会话与历史消息）、`message`（新消息广播）、`peers`（在线设备数）、`sessions`/`switch`（仅主机） |
+| `GET /ws` | WebSocket：`init`（会话与历史消息）、`message`（新消息广播）、`peers`（在线设备数）、`sessions`/`switch`/`delete`（仅主机）、`deleted`（删除广播） |
 | `POST /api/upload` | 表单字段 `file`，返回文件元数据 `{id,name,size,type}` |
 | `GET /api/files/{会话ID}/{文件ID}` | 在线预览，支持 Range 断点续传 |
 | `GET /api/files/{会话ID}/{文件ID}/download` | 带文件名下载（中文名用 RFC 5987 编码） |
@@ -100,3 +100,8 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 - **主机 = 启动服务的那台机器**：只有主机能看会话列表、切换会话，切换后所有设备一起进入
 - 主机身份由启动时打印的 `?host=<口令>` 认定，手机扫码拿到的是不带口令的地址
 - 页面顶部「扫码加入」按钮生成当前局域网地址的二维码，手机扫码即进入当前会话
+- **删除文件**：只有主机能删，删除会连磁盘实体一起删掉，聊天里显示为「已删除」占位
+- **文件类型按内容判定**：上传后读文件头识别真实类型，避免"扩展名是 .jpg 其实是 PDF"
+  导致预览失败；只有真实图片才内联预览，其余（含 PDF）显示为文件卡片
+- **布局**：手机端是单栏聊天（DeepSeek 风格输入框），文件列表为默认收起的抽屉；
+  PC 端左侧文件面板默认折叠成窄条，点击展开，状态会记住

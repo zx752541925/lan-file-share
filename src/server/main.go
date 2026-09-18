@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -84,13 +86,82 @@ func main() {
 	}
 }
 
-// lanURLs 返回手机可以访问的地址（用于二维码）。主机口令不会出现在这里。
-func (a *App) lanURLs() []string {
-	var urls []string
-	for _, ip := range lanIPs() {
-		urls = append(urls, fmt.Sprintf("http://%s:%s", ip, a.port))
+// LANAddress 是可以给手机访问的地址，带上网卡名方便辨认。
+type LANAddress struct {
+	Name    string `json:"name"`
+	IP      string `json:"ip"`
+	URL     string `json:"url"`
+	Virtual bool   `json:"virtual"`
+}
+
+// 这些网卡是虚拟机/容器用的，手机连不上，排序时压到最后并标注出来
+var virtualAdapterPattern = regexp.MustCompile(`(?i)wsl|hyper-v|vethernet|vmware|virtualbox|docker|loopback|bluetooth|tailscale|zerotier|radmin|tap`)
+
+// lanAddresses 返回可给手机访问的地址，真实 Wi-Fi 网段排前面。主机口令不会出现在这里。
+func (a *App) lanAddresses() []LANAddress {
+	var list []LANAddress
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return list
 	}
-	return urls
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil {
+				continue
+			}
+			ipText := ip.String()
+			if strings.HasPrefix(ipText, "169.254.") {
+				continue // 自动私有地址，没有意义
+			}
+			list = append(list, LANAddress{
+				Name:    iface.Name,
+				IP:      ipText,
+				URL:     fmt.Sprintf("http://%s:%s", ipText, a.port),
+				Virtual: virtualAdapterPattern.MatchString(iface.Name),
+			})
+		}
+	}
+
+	sort.SliceStable(list, func(i, j int) bool {
+		left, right := addressScore(list[i]), addressScore(list[j])
+		if left != right {
+			return left < right
+		}
+		return list[i].IP < list[j].IP
+	})
+	return list
+}
+
+// addressScore 越小越可能是手机能用的地址。
+func addressScore(address LANAddress) int {
+	score := 4
+	switch {
+	case strings.HasPrefix(address.IP, "192.168."):
+		score = 0
+	case strings.HasPrefix(address.IP, "10."):
+		score = 1
+	case strings.HasPrefix(address.IP, "172."):
+		score = 2
+	case strings.HasPrefix(address.IP, "100."):
+		score = 3
+	}
+	if address.Virtual {
+		score += 10
+	}
+	return score
 }
 
 // webAssets 优先用磁盘目录（开发时改前端立即生效），否则用编译进二进制的页面。
@@ -138,8 +209,13 @@ func printBanner(pageSource, dataDir, port, hostURL string) {
 	log.Printf("            ↑ 只有这台机器打开这个地址才能切换历史会话")
 	log.Printf("  本机地址 http://localhost:%s", port)
 
-	for _, ip := range lanIPs() {
-		log.Printf("  局域网   http://%s:%s", ip, port)
+	app := &App{port: port}
+	for _, address := range app.lanAddresses() {
+		mark := ""
+		if address.Virtual {
+			mark = "（虚拟网卡，手机连不上）"
+		}
+		log.Printf("  局域网   %s  %s%s", address.URL, address.Name, mark)
 	}
 
 	if runtime.GOOS == "windows" {
@@ -168,32 +244,6 @@ func openInBrowser(target string) {
 	if err := cmd.Start(); err != nil {
 		log.Printf("自动打开浏览器失败：%v（请手动访问 %s）", err, target)
 	}
-}
-
-func lanIPs() []string {
-	var ips []string
-
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ips
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || ipNet.IP.To4() == nil {
-				continue
-			}
-			ips = append(ips, ipNet.IP.String())
-		}
-	}
-	return ips
 }
 
 func exeDir() string {

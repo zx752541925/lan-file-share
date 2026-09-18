@@ -7,18 +7,25 @@
   <title>局域网文件传输</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
-<body data-view="chat">
-  <div class="app">
+<body>
+  <div class="app" id="app" data-files="collapsed">
     <header class="topbar">
       <div class="brand">
         <span class="brand-logo" aria-hidden="true">⇄</span>
         <div class="brand-text">
           <h1>局域网文件传输</h1>
-          <p class="brand-sub">会话 <b id="sessionName">—</b> · 手机连同一 Wi-Fi 即可互传</p>
+          <p class="brand-sub">会话 <b id="sessionName">—</b></p>
         </div>
       </div>
       <div class="topbar-actions">
         <span class="status" id="connStatus"><i></i><span id="connText">连接中…</span></span>
+        <button type="button" class="top-btn" id="filesBtn" title="文件列表">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7a2 2 0 0 1 2-2h3.5l2 2.5H18a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+          </svg>
+          <span>文件</span>
+          <em class="top-count" id="fileCountBadge">0</em>
+        </button>
         <button type="button" class="top-btn" id="qrBtn" title="扫码加入">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -43,9 +50,11 @@
     </header>
 
     <main class="layout">
-      <section class="panel panel-files" aria-label="共享文件">
+      <section class="panel panel-files" id="filesPanel" aria-label="共享文件">
         <div class="panel-head">
           <h2>共享文件</h2>
+          <button type="button" class="panel-close" id="filesClose" aria-label="收起">×</button>
+          <button type="button" class="panel-collapse" id="filesCollapse" aria-label="收起文件列表">‹</button>
           <span class="badge" id="fileCount">0 个</span>
         </div>
         <label class="dropzone" id="dropzone">
@@ -57,7 +66,7 @@
             </svg>
           </span>
           <strong>点击或拖拽文件到此处</strong>
-          <span class="dropzone-hint">局域网内其他设备可立即下载</span>
+          <span class="dropzone-hint">会话内所有设备可立即下载</span>
         </label>
         <ul class="file-list" id="fileList"></ul>
       </section>
@@ -66,44 +75,31 @@
         <div class="messages" id="messages"></div>
         <div class="upload-tray" id="uploadTray" hidden></div>
         <form class="composer" id="composer">
-          <button type="button" class="icon-btn" id="attachBtn" title="选择文件">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift + Enter 换行"></textarea>
-          <button type="submit" class="send-btn" title="发送">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 2 11 13" />
-              <path d="M22 2 15 22l-4-9-9-4 20-7z" />
-            </svg>
-            <span>发送</span>
-          </button>
+          <div class="composer-box">
+            <button type="button" class="icon-btn" id="attachBtn" title="选择文件">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+            </button>
+            <textarea id="input" rows="1" placeholder="发消息…"></textarea>
+            <button type="submit" class="send-btn" title="发送">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 19V5M5 12l7-7 7 7" />
+              </svg>
+            </button>
+          </div>
           <input type="file" id="pickChat" multiple hidden />
         </form>
       </section>
     </main>
 
-    <nav class="tabbar" aria-label="视图切换">
-      <button type="button" data-view="chat" class="active">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.9 9.9 0 0 1-3.9-.8L3 21l1.9-4.6A8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z" />
-        </svg>
-        聊天
-      </button>
-      <button type="button" data-view="files">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 7a2 2 0 0 1 2-2h3.5l2 2.5H18a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
-        </svg>
-        文件
-      </button>
-    </nav>
+    <div class="scrim" id="scrim" hidden></div>
   </div>
 
   <div class="drop-overlay" id="dropOverlay" hidden>
     <div>
       <strong>松手即上传</strong>
-      <span>文件会分享给房间里所有设备</span>
+      <span>文件会分享给会话里所有设备</span>
     </div>
   </div>
 
@@ -116,7 +112,15 @@
       <div class="qr-box" id="qrBox"></div>
       <p class="qr-url" id="qrUrl"></p>
       <div class="qr-alts" id="qrAlts"></div>
-      <p class="modal-tip">手机连同一个 Wi-Fi，扫码即可进入当前会话</p>
+      <details class="qr-help">
+        <summary>扫了连不上？</summary>
+        <ol>
+          <li>确认手机和电脑连的是同一个 Wi-Fi，别用流量或访客网络</li>
+          <li>用手机系统浏览器打开，别用微信 / QQ 内置浏览器</li>
+          <li>关掉手机的 VPN、加速器、私人 DNS 再试</li>
+          <li>第一次运行若防火墙提示被点掉，"允许应用通过防火墙"里放行 lanfile-server.exe</li>
+        </ol>
+      </details>
     </div>
   </div>
 
@@ -128,6 +132,21 @@
       </div>
       <ul class="session-list" id="sessionList"></ul>
       <p class="modal-tip">切换后所有设备一起进入所选会话，原会话不受影响</p>
+    </div>
+  </div>
+
+  <div class="modal" id="confirmModal" hidden>
+    <div class="modal-card modal-confirm">
+      <div class="modal-head">
+        <h3>删除文件</h3>
+        <button type="button" class="modal-close" data-close aria-label="关闭">×</button>
+      </div>
+      <p class="confirm-text" id="confirmText"></p>
+      <div class="confirm-actions">
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="button" class="btn-danger" id="confirmOk">删除</button>
+      </div>
+      <p class="modal-tip">文件会从磁盘删除，聊天里显示为「已删除」</p>
     </div>
   </div>
 

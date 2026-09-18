@@ -1,9 +1,11 @@
 // 前端逻辑：WebSocket 收发消息与切换会话，HTTP 上传/下载文件
 
 const el = {
+  app: document.getElementById('app'),
   messages: document.getElementById('messages'),
   fileList: document.getElementById('fileList'),
   fileCount: document.getElementById('fileCount'),
+  fileCountBadge: document.getElementById('fileCountBadge'),
   uploadTray: document.getElementById('uploadTray'),
   composer: document.getElementById('composer'),
   input: document.getElementById('input'),
@@ -14,6 +16,11 @@ const el = {
   connStatus: document.getElementById('connStatus'),
   connText: document.getElementById('connText'),
   sessionName: document.getElementById('sessionName'),
+  filesBtn: document.getElementById('filesBtn'),
+  filesPanel: document.getElementById('filesPanel'),
+  filesClose: document.getElementById('filesClose'),
+  filesCollapse: document.getElementById('filesCollapse'),
+  scrim: document.getElementById('scrim'),
   qrBtn: document.getElementById('qrBtn'),
   historyBtn: document.getElementById('historyBtn'),
   qrModal: document.getElementById('qrModal'),
@@ -22,6 +29,9 @@ const el = {
   qrAlts: document.getElementById('qrAlts'),
   sessionModal: document.getElementById('sessionModal'),
   sessionList: document.getElementById('sessionList'),
+  confirmModal: document.getElementById('confirmModal'),
+  confirmText: document.getElementById('confirmText'),
+  confirmOk: document.getElementById('confirmOk'),
   userName: document.getElementById('userName'),
   userAvatar: document.getElementById('userAvatar'),
   userBtn: document.getElementById('userBtn'),
@@ -35,10 +45,11 @@ const url = {
 };
 
 const isDesktop = () => window.matchMedia('(min-width: 900px)').matches;
-const isMobileDevice = () => /android|iphone|ipad|mobile/i.test(navigator.userAgent);
+const isMobileLayout = () => window.matchMedia('(max-width: 899px)').matches;
 
 // 主机口令只出现在服务启动时自动打开的地址里，用于判定"谁启动的服务谁就是主机"
-const hostToken = new URLSearchParams(location.search).get('host') || localStorage.getItem('lanfile.host') || '';
+const hostToken =
+  new URLSearchParams(location.search).get('host') || localStorage.getItem('lanfile.host') || '';
 if (hostToken) {
   localStorage.setItem('lanfile.host', hostToken);
   const clean = new URL(location.href);
@@ -46,23 +57,38 @@ if (hostToken) {
   history.replaceState(null, '', clean.pathname + clean.search + clean.hash);
 }
 
+// 设备 ID：长期存在浏览器里，刷新或重开页面仍是同一台设备，
+// 这样自己的历史消息刷新后依然显示在右边
+let clientId = localStorage.getItem('lanfile.clientId') || '';
+if (!/^[0-9a-f]{16}$/.test(clientId)) {
+  const bytes = new Uint8Array(8);
+  (window.crypto || {}).getRandomValues?.(bytes);
+  clientId = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  if (!/^[0-9a-f]{16}$/.test(clientId)) {
+    clientId = Math.random().toString(16).slice(2).padEnd(16, '0').slice(0, 16);
+  }
+  localStorage.setItem('lanfile.clientId', clientId);
+}
+
 const state = {
-  selfId: '',
+  selfId: clientId,
+  clientId,
   name: localStorage.getItem('lanfile.name') || '',
   host: false,
   peers: 0,
   connected: false,
   session: null,
   sessions: [],
-  urls: [],
+  lan: [],
   qrUrl: '',
   messages: [],
   uploads: [],
 };
 
-if (!state.name) {
-  state.name = `${isMobileDevice() ? '我的手机' : '我的电脑'}-${Math.random().toString(16).slice(2, 4).toUpperCase()}`;
-  localStorage.setItem('lanfile.name', state.name);
+// 旧版本的自动昵称（我的电脑-3F）作废，交给服务端重新分配
+if (/^我的(电脑|手机)-[0-9A-F]{2}$/.test(state.name)) {
+  state.name = '';
+  localStorage.removeItem('lanfile.name');
 }
 
 /* ---------------- 工具 ---------------- */
@@ -100,14 +126,29 @@ function formatSessionFull(id) {
 function formatStamp(ts) {
   const date = new Date(ts);
   const today = new Date();
-  const sameDay = date.toDateString() === today.toDateString();
   const time = formatTime(ts);
-  if (sameDay) return time;
+  if (date.toDateString() === today.toDateString()) return time;
   return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${time}`;
 }
 
 const extOf = (name) => (name.includes('.') ? name.split('.').pop().slice(0, 4).toUpperCase() : 'FILE');
+// 只有真实内容就是图片才内联预览（类型由服务端读文件头判定）
 const isImage = (file) => (file.type || '').startsWith('image/');
+
+// 头像显示昵称里的数字（海豚-27 → 27），没有数字就用首字（主机 → 主）
+function avatarText(name) {
+  const match = /-(\d{1,3})$/.exec(name || '');
+  if (match) return match[1];
+  return (name || '?').slice(0, 1);
+}
+
+// 头像底色按设备 ID 固定，方便区分不同设备
+function avatarClass(seed) {
+  const text = String(seed || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  return `av-${hash % 8}`;
+}
 
 let toastTimer;
 function showToast(text) {
@@ -119,6 +160,8 @@ function showToast(text) {
   }, 2200);
 }
 
+const findFile = (id) => state.messages.find((msg) => msg.file?.id === id)?.file;
+
 function download(file) {
   const link = document.createElement('a');
   link.href = url.download(state.session.id, file.id);
@@ -127,6 +170,47 @@ function download(file) {
   link.click();
   link.remove();
 }
+
+/* ---------------- 文件面板：PC 折叠 / 手机抽屉 ---------------- */
+
+const FILES_KEY = 'lanfile.files';
+const filesWantedOpen = () => localStorage.getItem(FILES_KEY) === 'open';
+
+function applyFilesLayout() {
+  const open = filesWantedOpen();
+
+  if (isMobileLayout()) {
+    document.body.classList.toggle('files-open', open);
+    el.scrim.hidden = !open;
+    el.app.dataset.files = 'collapsed';
+  } else {
+    document.body.classList.remove('files-open');
+    el.scrim.hidden = true;
+    el.app.dataset.files = open ? 'open' : 'collapsed';
+  }
+}
+
+function toggleFiles(force) {
+  const next = force === undefined ? !filesWantedOpen() : force;
+  localStorage.setItem(FILES_KEY, next ? 'open' : 'closed');
+  applyFilesLayout();
+}
+
+el.filesBtn.addEventListener('click', () => toggleFiles());
+el.filesClose.addEventListener('click', () => toggleFiles(false));
+el.filesCollapse.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleFiles(false);
+});
+el.scrim.addEventListener('click', () => toggleFiles(false));
+el.filesPanel.addEventListener('click', (event) => {
+  // PC 折叠状态下点窄条即可展开
+  if (!isMobileLayout() && !filesWantedOpen()) toggleFiles(true);
+  // PC 展开状态下点标题栏可以收起
+  else if (!isMobileLayout() && event.target.closest('.panel-head')) toggleFiles(false);
+  if (isMobileLayout() && event.target.closest('.file-item, .dropzone')) toggleFiles(false);
+});
+window.addEventListener('resize', applyFilesLayout);
 
 /* ---------------- WebSocket ---------------- */
 
@@ -156,7 +240,7 @@ function connect() {
   socket.addEventListener('open', () => {
     retryDelay = 1000;
     setConnected(true);
-    send({ type: 'hello', name: state.name });
+    send({ type: 'hello', name: state.name, clientId: state.clientId });
   });
 
   socket.addEventListener('message', (event) => {
@@ -174,13 +258,29 @@ function connect() {
         state.peers = data.peers || 1;
         state.session = data.session;
         state.messages = data.history || [];
-        state.urls = data.urls || [];
+        state.lan = data.lan || [];
+        state.qrUrl = '';
+        if (!state.name && data.name) adoptName(data.name);
         renderAll();
+        break;
+
+      case 'self':
+        // 服务端确认的昵称（没名字的设备会拿到「主机」或随机的「海豚-27」）
+        if (data.selfId) state.selfId = data.selfId;
+        if (data.name && data.name !== state.name) adoptName(data.name);
         break;
 
       case 'message':
         state.messages.push(data.message);
         renderAll();
+        break;
+
+      case 'deleted':
+        for (const msg of state.messages) {
+          if (msg.file?.id === data.fileId) msg.file.deleted = true;
+        }
+        renderAll();
+        showToast('文件已删除');
         break;
 
       case 'peers':
@@ -218,33 +318,54 @@ function renderStatus() {
   el.connText.textContent = state.connected ? `已连接 · ${state.peers} 台设备` : '离线，重连中…';
 }
 
+function adoptName(name) {
+  state.name = name;
+  localStorage.setItem('lanfile.name', name);
+  el.userName.textContent = name;
+  el.userAvatar.textContent = avatarText(name);
+  renderAll();
+}
+
 function renderSession() {
   el.sessionName.textContent = state.session ? formatSession(state.session.id) : '—';
   el.historyBtn.hidden = !state.host; // 只有主机能切换历史会话
 }
 
 function thumbHtml(file) {
-  return isImage(file)
+  return isImage(file) && !file.deleted
     ? `<span class="file-thumb"><img src="${esc(url.file(state.session.id, file.id))}" alt="" loading="lazy" /></span>`
     : `<span class="file-thumb">${esc(extOf(file.name))}</span>`;
 }
 
 function renderMessages() {
   if (!state.messages.length) {
-    el.messages.innerHTML = '<p class="empty-tip">还没有消息，发送第一条吧</p>';
+    el.messages.innerHTML = '<p class="empty-tip">还没有消息<br />发送第一条，或直接拖入文件</p>';
     return;
   }
 
   el.messages.innerHTML = state.messages
     .map((msg) => {
-      const mine = msg.clientId === state.selfId;
+      // 自己发的：设备 ID 对得上（历史消息按昵称兜底）
+      const mine =
+        msg.clientId === state.clientId ||
+        msg.clientId === state.selfId ||
+        (Boolean(state.name) && msg.name === state.name);
       const parts = [];
 
       if (msg.text) parts.push(`<div class="bubble">${esc(msg.text)}</div>`);
 
       if (msg.file) {
         const file = msg.file;
-        if (isImage(file)) {
+
+        if (file.deleted) {
+          parts.push(`<div class="file-card deleted">
+              <span class="file-thumb">DEL</span>
+              <span class="file-meta">
+                <span class="file-name">${esc(file.name)}</span>
+                <span class="file-sub">已删除</span>
+              </span>
+            </div>`);
+        } else if (isImage(file)) {
           parts.push(
             `<img class="msg-image" src="${esc(url.file(state.session.id, file.id))}" alt="${esc(file.name)}" data-open="${esc(file.id)}" />`
           );
@@ -261,7 +382,7 @@ function renderMessages() {
       }
 
       return `<div class="msg ${mine ? 'mine' : 'theirs'}">
-          <span class="msg-avatar">${esc(mine ? state.name.slice(0, 1) : msg.name.slice(0, 1))}</span>
+          <span class="msg-avatar ${avatarClass(mine ? state.clientId : msg.clientId)}">${esc(avatarText(mine ? state.name : msg.name))}</span>
           <div class="msg-body">
             <div class="msg-head">
               <span class="msg-name">${esc(mine ? state.name : msg.name)}</span>
@@ -277,8 +398,12 @@ function renderMessages() {
 }
 
 function renderFiles() {
-  const files = state.messages.filter((msg) => msg.file).map((msg) => ({ ...msg.file, from: msg.name }));
+  const files = state.messages
+    .filter((msg) => msg.file && !msg.file.deleted)
+    .map((msg) => ({ ...msg.file, from: msg.name }));
+
   el.fileCount.textContent = `${files.length} 个`;
+  el.fileCountBadge.textContent = String(files.length);
 
   if (!files.length) {
     el.fileList.innerHTML = '<li class="empty-tip">暂无共享文件</li>';
@@ -293,6 +418,15 @@ function renderFiles() {
             <span class="file-name">${esc(file.name)}</span>
             <span class="file-sub">${formatSize(file.size)} · 来自 ${esc(file.from)}</span>
           </span>
+          ${
+            state.host
+              ? `<button type="button" class="file-del" data-id="${esc(file.id)}" title="删除文件" aria-label="删除文件">
+                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                     <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6" />
+                   </svg>
+                 </button>`
+              : ''
+          }
         </li>`
     )
     .join('');
@@ -323,20 +457,32 @@ function renderSessions() {
   el.sessionList.innerHTML = state.sessions
     .map(
       (session) => `<li class="session-item ${session.current ? 'current' : ''}" data-session="${esc(session.id)}">
-          <span class="session-title">
-            ${esc(formatSessionFull(session.id))}
-            ${session.current ? '<span class="session-tag">当前</span>' : ''}
+          <span class="session-main">
+            <span class="session-title">
+              ${esc(formatSessionFull(session.id))}
+              ${session.current ? '<span class="session-tag">当前</span>' : ''}
+            </span>
+            <span class="session-sub">最后对话 ${formatStamp(session.updatedAt)} · ${session.messages} 条消息 · ${session.files} 个文件</span>
           </span>
-          <span class="session-sub">最后对话 ${formatStamp(session.updatedAt)} · ${session.messages} 条消息 · ${session.files} 个文件</span>
+          ${
+            state.host && !session.current
+              ? `<button type="button" class="session-del" data-del="${esc(session.id)}" title="删除会话" aria-label="删除会话">×</button>`
+              : ''
+          }
         </li>`
     )
     .join('');
 }
 
 function renderQr() {
-  const targets = state.urls.length ? state.urls : [location.origin];
-  if (!state.qrUrl || !targets.includes(state.qrUrl)) {
-    state.qrUrl = targets[0];
+  const list = state.lan.length
+    ? state.lan
+    : [{ name: '本机', ip: location.hostname, url: location.origin, virtual: false }];
+
+  const usable = list.filter((item) => !item.virtual);
+  const targets = usable.length ? usable : list;
+  if (!state.qrUrl || !list.some((item) => item.url === state.qrUrl)) {
+    state.qrUrl = targets[0].url;
   }
 
   try {
@@ -350,8 +496,15 @@ function renderQr() {
 
   el.qrUrl.textContent = state.qrUrl;
   el.qrAlts.innerHTML =
-    targets.length > 1
-      ? targets.map((item) => `<button type="button" class="qr-alt ${item === state.qrUrl ? 'active' : ''}" data-url="${esc(item)}">${esc(item.replace('http://', ''))}</button>`).join('')
+    list.length > 1
+      ? list
+          .map(
+            (item) => `<button type="button" class="qr-alt ${item.url === state.qrUrl ? 'active' : ''}" data-url="${esc(item.url)}">
+                <span class="qr-alt-name">${esc(item.name)}${item.virtual ? ' · 手机不可用' : ''}</span>
+                <span>${esc(item.ip)}</span>
+              </button>`
+          )
+          .join('')
       : '';
 }
 
@@ -373,6 +526,7 @@ function openModal(modal) {
 function closeModals() {
   el.qrModal.hidden = true;
   el.sessionModal.hidden = true;
+  el.confirmModal.hidden = true;
 }
 
 el.qrBtn.addEventListener('click', () => {
@@ -385,7 +539,7 @@ el.historyBtn.addEventListener('click', () => {
   send({ type: 'sessions' });
 });
 
-for (const modal of [el.qrModal, el.sessionModal]) {
+for (const modal of [el.qrModal, el.sessionModal, el.confirmModal]) {
   modal.addEventListener('click', (event) => {
     if (event.target === modal || event.target.hasAttribute('data-close')) closeModals();
   });
@@ -399,20 +553,61 @@ el.qrAlts.addEventListener('click', (event) => {
 });
 
 el.sessionList.addEventListener('click', (event) => {
+  const remove = event.target.closest('.session-del');
+  if (remove) {
+    event.stopPropagation();
+    askDeleteSession(remove.dataset.del);
+    return;
+  }
+
   const item = event.target.closest('.session-item');
   if (!item || item.classList.contains('current')) return;
   send({ type: 'switch', sessionId: item.dataset.session });
 });
 
+// 删除文件：主持人确认后连磁盘文件一起删
+let pendingDelete = '';
+let pendingSession = '';
+
+function askDelete(fileId) {
+  const file = findFile(fileId);
+  if (!file) return;
+  pendingSession = '';
+  pendingDelete = fileId;
+  el.confirmText.textContent = file.name;
+  openModal(el.confirmModal);
+}
+
+// 删除整个历史会话：连文件夹和里面的文件一起删（当前会话不能删）
+function askDeleteSession(sessionId) {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  pendingDelete = '';
+  pendingSession = sessionId;
+  el.confirmText.textContent = `会话 ${formatSessionFull(sessionId)}（${session.messages} 条消息 · ${session.files} 个文件）`;
+  openModal(el.confirmModal);
+}
+
+el.confirmOk.addEventListener('click', () => {
+  if (pendingSession) send({ type: 'deleteSession', sessionId: pendingSession });
+  else if (pendingDelete) send({ type: 'delete', fileId: pendingDelete });
+  pendingSession = '';
+  pendingDelete = '';
+  closeModals();
+});
+
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeModals();
+  if (event.key === 'Escape') {
+    closeModals();
+    toggleFiles(false);
+  }
 });
 
 /* ---------------- 交互 ---------------- */
 
 function autoGrow() {
   el.input.style.height = 'auto';
-  el.input.style.height = `${Math.min(el.input.scrollHeight, 130)}px`;
+  el.input.style.height = `${Math.min(el.input.scrollHeight, 120)}px`;
 }
 
 function sendText(text) {
@@ -504,9 +699,23 @@ for (const picker of [el.pickTop, el.pickChat]) {
 
 el.attachBtn.addEventListener('click', () => el.pickChat.click());
 
+el.fileList.addEventListener('click', (event) => {
+  const remove = event.target.closest('.file-del');
+  if (remove) {
+    event.stopPropagation();
+    askDelete(remove.dataset.id);
+    return;
+  }
+
+  const item = event.target.closest('.file-item');
+  if (!item) return;
+  const file = findFile(item.dataset.download);
+  if (file) download(file);
+});
+
 document.addEventListener('click', (event) => {
   const downloadTarget = event.target.closest('[data-download]');
-  if (downloadTarget) {
+  if (downloadTarget && !event.target.closest('.file-del')) {
     const file = findFile(downloadTarget.dataset.download);
     if (file) download(file);
     return;
@@ -516,11 +725,6 @@ document.addEventListener('click', (event) => {
   if (image) window.open(url.file(state.session.id, image.dataset.open), '_blank');
 });
 
-function findFile(id) {
-  const message = state.messages.find((msg) => msg.file?.id === id);
-  return message?.file;
-}
-
 el.userBtn.addEventListener('click', () => {
   const name = prompt('修改本机昵称', state.name);
   if (!name?.trim()) return;
@@ -528,8 +732,8 @@ el.userBtn.addEventListener('click', () => {
   state.name = name.trim().slice(0, 16);
   localStorage.setItem('lanfile.name', state.name);
   el.userName.textContent = state.name;
-  el.userAvatar.textContent = state.name.slice(0, 1);
-  send({ type: 'hello', name: state.name });
+  el.userAvatar.textContent = avatarText(state.name);
+  send({ type: 'hello', name: state.name, clientId: state.clientId });
   renderAll();
 });
 
@@ -566,14 +770,9 @@ if (supportsDragDrop) {
   window.addEventListener('blur', hideDropOverlay);
 }
 
-document.querySelectorAll('.tabbar button').forEach((button) => {
-  button.addEventListener('click', () => {
-    document.body.dataset.view = button.dataset.view;
-    document.querySelectorAll('.tabbar button').forEach((item) => item.classList.toggle('active', item === button));
-  });
-});
-
 el.userName.textContent = state.name;
-el.userAvatar.textContent = state.name.slice(0, 1);
+el.userAvatar.textContent = avatarText(state.name) || '?';
+el.userAvatar.className = `avatar ${avatarClass(state.clientId)}`;
+applyFilesLayout();
 renderAll();
 connect();

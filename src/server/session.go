@@ -16,10 +16,11 @@ const maxStoredMessages = 500
 var sessionIDPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?$`)
 
 type FileMeta struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Type string `json:"type"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Type    string `json:"type"`
+	Deleted bool   `json:"deleted,omitempty"`
 }
 
 type Message struct {
@@ -207,12 +208,19 @@ func (m *Manager) Info(session *Session) *SessionInfo {
 }
 
 func (m *Manager) infoLocked(session *Session) SessionInfo {
+	files := 0
+	for _, file := range session.Files {
+		if !file.Deleted {
+			files++
+		}
+	}
+
 	return SessionInfo{
 		ID:        session.ID,
 		CreatedAt: session.CreatedAt,
 		UpdatedAt: session.UpdatedAt,
 		Messages:  len(session.Messages),
-		Files:     len(session.Files),
+		Files:     files,
 		Current:   session == m.current,
 	}
 }
@@ -274,6 +282,57 @@ func (m *Manager) File(sessionID, fileID string) (FileMeta, bool) {
 	}
 	file, ok := session.fileIndex[fileID]
 	return file, ok
+}
+
+// DeleteSession 删除整个会话目录（含里面的文件），当前会话不允许删除。
+func (m *Manager) DeleteSession(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !sessionIDPattern.MatchString(sessionID) {
+		return fmt.Errorf("非法会话 ID")
+	}
+	if m.current != nil && m.current.ID == sessionID {
+		return fmt.Errorf("当前会话不能删除")
+	}
+	if _, ok := m.index[sessionID]; !ok {
+		return fmt.Errorf("会话不存在")
+	}
+
+	if err := os.RemoveAll(filepath.Join(m.root, sessionID)); err != nil {
+		return err
+	}
+	delete(m.index, sessionID)
+	return nil
+}
+
+// DeleteFile 标记文件已删除并返回它在磁盘上的路径，由调用方删除实体文件。
+func (m *Manager) DeleteFile(fileID string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session := m.current
+	file, ok := session.fileIndex[fileID]
+	if !ok || file.Deleted {
+		return "", false
+	}
+
+	file.Deleted = true
+	session.fileIndex[fileID] = file
+	for i := range session.Files {
+		if session.Files[i].ID == fileID {
+			session.Files[i] = file
+		}
+	}
+	// 消息里内嵌的文件信息也要标记，否则重新加载历史时被删的文件会"复活"
+	for i := range session.Messages {
+		if session.Messages[i].File != nil && session.Messages[i].File.ID == fileID {
+			session.Messages[i].File.Deleted = true
+		}
+	}
+	m.persistLocked(session)
+
+	return filepath.Join(m.root, session.ID, "uploads", fileID), true
 }
 
 func (m *Manager) ensureLocked(session *Session) error {

@@ -30,6 +30,8 @@ type Client struct {
 	id   string
 	name string
 	host bool
+	// number 是访客昵称里的数字，用来保证同时在线设备不重号
+	number int
 }
 
 // Hub 维护所有连接，并按顺序处理注册、注销与广播。
@@ -39,6 +41,7 @@ type Hub struct {
 	unregister chan *Client
 	broadcast  chan []byte
 	countReq   chan chan int
+	numbersReq chan chan map[int]bool
 }
 
 func NewHub() *Hub {
@@ -48,6 +51,7 @@ func NewHub() *Hub {
 		unregister: make(chan *Client),
 		broadcast:  make(chan []byte, 128),
 		countReq:   make(chan chan int),
+		numbersReq: make(chan chan map[int]bool),
 	}
 }
 
@@ -72,6 +76,15 @@ func (h *Hub) Run() {
 
 		case reply := <-h.countReq:
 			reply <- len(h.clients)
+
+		case reply := <-h.numbersReq:
+			used := make(map[int]bool, len(h.clients))
+			for client := range h.clients {
+				if client.number > 0 {
+					used[client.number] = true
+				}
+			}
+			reply <- used
 		}
 	}
 }
@@ -83,6 +96,13 @@ func (h *Hub) Send(payload []byte) {
 func (h *Hub) Count() int {
 	reply := make(chan int, 1)
 	h.countReq <- reply
+	return <-reply
+}
+
+// UsedNumbers 返回当前在线设备已经占用的昵称数字。
+func (h *Hub) UsedNumbers() map[int]bool {
+	reply := make(chan map[int]bool, 1)
+	h.numbersReq <- reply
 	return <-reply
 }
 

@@ -22,19 +22,22 @@ import (
 type Event struct {
 	Type     string        `json:"type"`
 	SelfID   string        `json:"selfId,omitempty"`
+	Name     string        `json:"name,omitempty"`
 	Host     bool          `json:"host,omitempty"`
 	Peers    int           `json:"peers"`
 	Session  *SessionInfo  `json:"session,omitempty"`
 	History  []Message     `json:"history"`
 	Sessions []SessionInfo `json:"sessions,omitempty"`
-	URLs     []string      `json:"urls,omitempty"`
+	LAN      []LANAddress  `json:"lan,omitempty"`
 	Message  *Message      `json:"message,omitempty"`
+	FileID   string        `json:"fileId,omitempty"`
 }
 
 // Incoming 是浏览器发来的消息。
 type Incoming struct {
 	Type      string `json:"type"`
 	Name      string `json:"name"`
+	ClientID  string `json:"clientId"`
 	Text      string `json:"text"`
 	FileID    string `json:"fileId"`
 	SessionID string `json:"sessionId"`
@@ -50,8 +53,12 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		conn: conn,
 		send: make(chan []byte, 64),
 		id:   newID(),
-		name: "未命名设备",
 		host: a.isHost(r),
+	}
+	if client.host {
+		client.name = hostName
+	} else {
+		client.name = "访客"
 	}
 
 	a.hub.register <- client
@@ -89,11 +96,12 @@ func (a *App) serveClient(client *Client) {
 	a.sendTo(client, Event{
 		Type:    "init",
 		SelfID:  client.id,
+		Name:    client.name,
 		Host:    client.host,
 		Peers:   a.hub.Count(),
 		Session: a.sessions.Info(session),
 		History: a.sessions.Messages(session),
-		URLs:    a.lanURLs(),
+		LAN:     a.lanAddresses(),
 	})
 
 	for {
@@ -109,7 +117,7 @@ func (a *App) serveClient(client *Client) {
 
 		switch incoming.Type {
 		case "hello":
-			client.name = cleanName(incoming.Name)
+			a.applyIdentity(client, incoming)
 
 		case "chat":
 			a.handleChat(client, incoming)
@@ -126,8 +134,64 @@ func (a *App) serveClient(client *Client) {
 				continue
 			}
 			a.handleSwitch(incoming)
+
+		case "delete":
+			// 只有主机能删除文件
+			if !client.host {
+				continue
+			}
+			a.handleDelete(incoming.FileID)
+
+		case "deleteSession":
+			// 只有主机能删除历史会话
+			if !client.host {
+				continue
+			}
+			a.handleDeleteSession(incoming.SessionID)
 		}
 	}
+}
+
+// applyIdentity 固定设备身份：id 由浏览器生成并长期保存，昵称没给就自动分配。
+func (a *App) applyIdentity(client *Client, incoming Incoming) {
+	if id := strings.TrimSpace(incoming.ClientID); isClientID(id) {
+		client.id = id
+	}
+
+	name := strings.TrimSpace(incoming.Name)
+	if name == "" {
+		a.assignDefaultName(client)
+		a.replySelf(client)
+		return
+	}
+
+	client.name = cleanName(name)
+	if number := numberFromName(client.name); number > 0 {
+		if a.hub.UsedNumbers()[number] {
+			// 这个数字已被在线设备占用，换一个，保证同时在线不重号
+			a.assignDefaultName(client)
+		} else {
+			client.number = number
+		}
+	}
+	a.replySelf(client)
+}
+
+func (a *App) assignDefaultName(client *Client) {
+	if client.host {
+		client.name = hostName
+		client.number = 0
+		return
+	}
+
+	used := a.hub.UsedNumbers()
+	name, number := randomGuestName(func(candidate int) bool { return used[candidate] })
+	client.name = name
+	client.number = number
+}
+
+func (a *App) replySelf(client *Client) {
+	a.sendTo(client, Event{Type: "self", SelfID: client.id, Name: client.name})
 }
 
 func (a *App) handleChat(client *Client, incoming Incoming) {
@@ -170,6 +234,27 @@ func (a *App) handleSwitch(incoming Incoming) {
 		Session: a.sessions.Info(session),
 		History: a.sessions.Messages(session),
 	})
+}
+
+func (a *App) handleDelete(fileID string) {
+	path, ok := a.sessions.DeleteFile(fileID)
+	if !ok {
+		return
+	}
+
+	_ = os.Remove(path) // 磁盘实体一并删除
+	log.Printf("删除文件 %s", fileID)
+	a.broadcast(Event{Type: "deleted", FileID: fileID})
+}
+
+func (a *App) handleDeleteSession(sessionID string) {
+	if err := a.sessions.DeleteSession(sessionID); err != nil {
+		log.Printf("删除会话失败：%v", err)
+		return
+	}
+
+	log.Printf("删除会话 %s", sessionID)
+	a.broadcast(Event{Type: "sessions", Sessions: a.sessions.List()})
 }
 
 func (a *App) sendTo(client *Client, event Event) {
@@ -237,7 +322,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		ID:   filepath.Base(saved),
 		Name: cleanFileName(header.Filename),
 		Size: size,
-		Type: detectType(header.Filename, header.Header.Get("Content-Type")),
+		Type: sniffType(saved, header.Filename, header.Header.Get("Content-Type")),
 	}
 	a.sessions.AddFile(meta)
 	writeJSON(w, http.StatusOK, meta)
@@ -253,7 +338,7 @@ func (a *App) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta, ok := a.sessions.File(parts[0], parts[1])
-	if !ok {
+	if !ok || meta.Deleted {
 		http.NotFound(w, r)
 		return
 	}
@@ -317,6 +402,14 @@ func isFileID(value string) bool {
 	return err == nil
 }
 
+func isClientID(value string) bool {
+	if len(value) < 8 || len(value) > 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
 func cleanName(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -352,4 +445,39 @@ func detectType(name, declared string) string {
 		return byExt
 	}
 	return "application/octet-stream"
+}
+
+// sniffType 按文件真实内容判断类型，避免"扩展名是 .jpg、内容其实是 PDF"这类
+// 名不副实导致前端按图片渲染失败。嗅探不可靠时仍沿用声明值和扩展名。
+func sniffType(path, name, declared string) string {
+	if declared == "" || declared == "application/octet-stream" {
+		declared = detectType(name, declared)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return declared
+	}
+	defer func() { _ = file.Close() }()
+
+	buf := make([]byte, 512)
+	size, err := io.ReadFull(file, buf)
+	if size == 0 || (err != nil && err != io.ErrUnexpectedEOF && err != io.EOF) {
+		return declared
+	}
+
+	sniffed := http.DetectContentType(buf[:size])
+	switch {
+	case strings.HasPrefix(sniffed, "image/"):
+		// 真实图片：以内容为准，例如 .jpg 里其实是 PNG
+		return sniffed
+	case strings.HasPrefix(declared, "image/"):
+		// 声明是图片但内容不是：以内容为准，例如 .jpg 里其实是 PDF
+		if sniffed == "application/octet-stream" {
+			return declared
+		}
+		return sniffed
+	default:
+		return declared
+	}
 }
