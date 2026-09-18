@@ -2,6 +2,39 @@
 
 PC 与手机浏览器打开同一地址，即可聊天、互传文件。服务只监听局域网，不依赖外网。
 
+## 主要文件
+
+后端（Go）：
+
+| 文件 | 作用 |
+| --- | --- |
+| [src/server/main.go](src/server/main.go) | 程序入口：配置（命令行参数 / `LANFILE_*` 环境变量）、路由注册、静态页面与资源版本号、启动横幅 |
+| [src/server/api.go](src/server/api.go) | HTTP 接口（上传 / 下载 / 删除 / 定位）与 WebSocket 消息收发、广播 |
+| [src/server/session.go](src/server/session.go) | 会话与存储：会话目录懒创建、消息与文件元数据、生成 `文件清单.txt` |
+| [src/server/upload.go](src/server/upload.go) | 大文件分片上传与断点续传（init / status / chunk / complete）|
+| [src/server/hub.go](src/server/hub.go) | WebSocket 连接管理：上下线、心跳、广播、在线设备数 |
+| [src/server/auth.go](src/server/auth.go) | 权限判定（主机 / 其他设备），将来上公网时的鉴权扩展位 |
+| [src/server/names.go](src/server/names.go) | 访客昵称生成（词 + 数字，同时在线不重号）|
+| [webassets.go](webassets.go) | 把 `src/web` 编译进二进制，实现单文件分发 |
+
+前端（原生 HTML/CSS/JS，无构建）：
+
+| 文件 | 作用 |
+| --- | --- |
+| [src/web/index.html](src/web/index.html) | 页面结构：顶栏、消息区、输入区、文件抽屉、二维码/会话/确认浮窗 |
+| [src/web/app.js](src/web/app.js) | 前端逻辑：连接与渲染、上传（含分片续传）、删除、二维码、抽屉与折叠 |
+| [src/web/styles.css](src/web/styles.css) | 移动优先样式：手机单栏聊天，PC 左栏文件 + 右栏聊天 |
+| [src/web/vendor/qrcode.js](src/web/vendor/qrcode.js) | 二维码生成库（qrcode-generator，MIT 协议）|
+
+构建与脚本：
+
+| 文件 | 作用 |
+| --- | --- |
+| [Makefile](Makefile) | 构建入口：`make run` / `make build` / `make build-windows` |
+| [scripts/windows/portproxy.ps1](scripts/windows/portproxy.ps1) | Windows 10 下把端口映射进 WSL（用 exe 时不需要）|
+
+文档内快速跳转：[运行](#运行) · [Windows 单文件版](#windows-单文件版) · [接口](#接口) · [会话与主机](#会话与主机) · [文件存储](#文件存储) · [断点续传](#断点续传) · [手机打不开？](#手机打不开) · [环境变量](#环境变量) · [目录](#目录)
+
 ## 技术栈
 
 - 后端：Go（标准库 `net/http` + `gorilla/websocket`），单文件二进制，无运行时依赖
