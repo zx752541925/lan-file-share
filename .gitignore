@@ -1,0 +1,16 @@
+# 构建产物
+bin/
+dist/
+
+# 运行时数据
+data/
+
+# 本地环境与日志
+.env
+.env.local
+*.log
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
