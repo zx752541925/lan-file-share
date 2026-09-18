@@ -226,20 +226,21 @@ body.files-open .panel-files { transform: none; }
   cursor: pointer;
 }
 
-.panel-collapse {
+.panel-toggle {
   display: none;
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 50%;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
   background: var(--panel-soft);
   color: var(--muted);
-  font-size: 18px;
-  line-height: 1;
+  font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.panel-collapse:hover { color: var(--accent); }
+.panel-toggle:hover { color: var(--accent); border-color: var(--accent); }
+
+.modal.stacked { z-index: 90; }
 
 /* 头像底色按设备区分 */
 .av-0 { background: #e8efff; color: #2f6fed; }
@@ -812,7 +813,7 @@ body.files-open .panel-files { transform: none; }
   .panel-chat { border-radius: 0 var(--radius) var(--radius) 0; }
 
   .panel-close { display: none; }
-  .panel-collapse { display: grid; place-items: center; }
+  .panel-toggle { display: inline-flex; align-items: center; }
   .scrim { display: none !important; }
 
   /* 折叠成窄条 */
@@ -822,15 +823,18 @@ body.files-open .panel-files { transform: none; }
   .app[data-files="collapsed"] .panel-files .panel-head {
     flex-direction: column;
     align-items: center;
-    gap: 12px;
-    padding: 16px 6px;
+    gap: 10px;
+    padding: 14px 6px;
   }
+  /* 展开按钮在最上面，下面才是横排的标题 */
+  .app[data-files="collapsed"] .panel-files .panel-toggle { order: -1; }
   .app[data-files="collapsed"] .panel-files .panel-head h2 {
-    writing-mode: vertical-rl;
-    letter-spacing: 3px;
+    writing-mode: horizontal-tb;
+    letter-spacing: 1px;
     font-size: 12px;
     font-weight: 500;
     color: var(--muted);
+    text-align: center;
   }
   .app[data-files="collapsed"] .panel-files .badge { font-size: 11px; padding: 2px 7px; }
 

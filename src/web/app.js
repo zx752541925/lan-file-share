@@ -19,7 +19,8 @@ const el = {
   filesBtn: document.getElementById('filesBtn'),
   filesPanel: document.getElementById('filesPanel'),
   filesClose: document.getElementById('filesClose'),
-  filesCollapse: document.getElementById('filesCollapse'),
+  filesToggle: document.getElementById('filesToggle'),
+  filesToggleLabel: document.getElementById('filesToggleLabel'),
   scrim: document.getElementById('scrim'),
   qrBtn: document.getElementById('qrBtn'),
   historyBtn: document.getElementById('historyBtn'),
@@ -178,6 +179,7 @@ const filesWantedOpen = () => localStorage.getItem(FILES_KEY) === 'open';
 
 function applyFilesLayout() {
   const open = filesWantedOpen();
+  el.filesToggleLabel.textContent = open ? '收起' : '展开';
 
   if (isMobileLayout()) {
     document.body.classList.toggle('files-open', open);
@@ -198,9 +200,9 @@ function toggleFiles(force) {
 
 el.filesBtn.addEventListener('click', () => toggleFiles());
 el.filesClose.addEventListener('click', () => toggleFiles(false));
-el.filesCollapse.addEventListener('click', (event) => {
+el.filesToggle.addEventListener('click', (event) => {
   event.stopPropagation();
-  toggleFiles(false);
+  toggleFiles();
 });
 el.scrim.addEventListener('click', () => toggleFiles(false));
 el.filesPanel.addEventListener('click', (event) => {
@@ -296,7 +298,8 @@ function connect() {
       case 'session':
         state.session = data.session;
         state.messages = data.history || [];
-        closeModals();
+        if (keepModalsOpen) keepModalsOpen = false;
+        else closeModals();
         renderAll();
         showToast(`已切换到 ${formatSession(data.session.id)}`);
         break;
@@ -465,7 +468,7 @@ function renderSessions() {
             <span class="session-sub">最后对话 ${formatStamp(session.updatedAt)} · ${session.messages} 条消息 · ${session.files} 个文件</span>
           </span>
           ${
-            state.host && !session.current
+            state.host
               ? `<button type="button" class="session-del" data-del="${esc(session.id)}" title="删除会话" aria-label="删除会话">×</button>`
               : ''
           }
@@ -526,7 +529,19 @@ function openModal(modal) {
 function closeModals() {
   el.qrModal.hidden = true;
   el.sessionModal.hidden = true;
+  hideConfirm();
+}
+
+// 确认框叠在会话列表之上：确认或取消之后，会话列表仍然开着
+function openConfirm(text) {
+  el.confirmText.textContent = text;
+  el.confirmModal.hidden = false;
+  el.confirmModal.classList.add('stacked');
+}
+
+function hideConfirm() {
   el.confirmModal.hidden = true;
+  el.confirmModal.classList.remove('stacked');
 }
 
 el.qrBtn.addEventListener('click', () => {
@@ -539,11 +554,15 @@ el.historyBtn.addEventListener('click', () => {
   send({ type: 'sessions' });
 });
 
-for (const modal of [el.qrModal, el.sessionModal, el.confirmModal]) {
+for (const modal of [el.qrModal, el.sessionModal]) {
   modal.addEventListener('click', (event) => {
     if (event.target === modal || event.target.hasAttribute('data-close')) closeModals();
   });
 }
+
+el.confirmModal.addEventListener('click', (event) => {
+  if (event.target === el.confirmModal || event.target.hasAttribute('data-close')) hideConfirm();
+});
 
 el.qrAlts.addEventListener('click', (event) => {
   const button = event.target.closest('.qr-alt');
@@ -568,32 +587,38 @@ el.sessionList.addEventListener('click', (event) => {
 // 删除文件：主持人确认后连磁盘文件一起删
 let pendingDelete = '';
 let pendingSession = '';
+// 删除当前会话时服务端会广播新会话，这个标记让会话列表保持打开
+let keepModalsOpen = false;
 
 function askDelete(fileId) {
   const file = findFile(fileId);
   if (!file) return;
   pendingSession = '';
   pendingDelete = fileId;
-  el.confirmText.textContent = file.name;
-  openModal(el.confirmModal);
+  openConfirm(file.name);
 }
 
-// 删除整个历史会话：连文件夹和里面的文件一起删（当前会话不能删）
+// 删除整个会话：连文件夹和里面的文件一起删，删的是当前会话就马上开新会话
 function askDeleteSession(sessionId) {
   const session = state.sessions.find((item) => item.id === sessionId);
   if (!session) return;
   pendingDelete = '';
   pendingSession = sessionId;
-  el.confirmText.textContent = `会话 ${formatSessionFull(sessionId)}（${session.messages} 条消息 · ${session.files} 个文件）`;
-  openModal(el.confirmModal);
+  const title = `${session.current ? '当前会话' : '会话'} ${formatSessionFull(sessionId)}（${session.messages} 条消息 · ${session.files} 个文件）`;
+  openConfirm(`${title}${session.current ? '，删除后会立即开始一个新会话' : ''}`);
 }
 
 el.confirmOk.addEventListener('click', () => {
-  if (pendingSession) send({ type: 'deleteSession', sessionId: pendingSession });
-  else if (pendingDelete) send({ type: 'delete', fileId: pendingDelete });
+  if (pendingSession) {
+    // 删当前会话会让服务端广播新会话，这里别把会话列表关掉
+    keepModalsOpen = pendingSession === state.session?.id;
+    send({ type: 'deleteSession', sessionId: pendingSession });
+  } else if (pendingDelete) {
+    send({ type: 'delete', fileId: pendingDelete });
+  }
   pendingSession = '';
   pendingDelete = '';
-  closeModals();
+  hideConfirm();
 });
 
 document.addEventListener('keydown', (event) => {

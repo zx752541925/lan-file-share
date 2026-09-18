@@ -57,8 +57,6 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	if client.host {
 		client.name = hostName
-	} else {
-		client.name = "访客"
 	}
 
 	a.hub.register <- client
@@ -167,7 +165,7 @@ func (a *App) applyIdentity(client *Client, incoming Incoming) {
 
 	client.name = cleanName(name)
 	if number := numberFromName(client.name); number > 0 {
-		if a.hub.UsedNumbers()[number] {
+		if a.hub.UsedNumbers(client.id)[number] {
 			// 这个数字已被在线设备占用，换一个，保证同时在线不重号
 			a.assignDefaultName(client)
 		} else {
@@ -184,7 +182,7 @@ func (a *App) assignDefaultName(client *Client) {
 		return
 	}
 
-	used := a.hub.UsedNumbers()
+	used := a.hub.UsedNumbers(client.id)
 	name, number := randomGuestName(func(candidate int) bool { return used[candidate] })
 	client.name = name
 	client.number = number
@@ -248,12 +246,24 @@ func (a *App) handleDelete(fileID string) {
 }
 
 func (a *App) handleDeleteSession(sessionID string) {
-	if err := a.sessions.DeleteSession(sessionID); err != nil {
+	replacement, err := a.sessions.DeleteSession(sessionID)
+	if err != nil {
 		log.Printf("删除会话失败：%v", err)
 		return
 	}
 
 	log.Printf("删除会话 %s", sessionID)
+
+	// 删掉的正好是当前会话：立刻开一个新会话，所有设备一起切过去
+	if replacement != nil {
+		log.Printf("已开启新会话 %s", replacement.ID)
+		a.broadcast(Event{
+			Type:    "session",
+			Session: a.sessions.Info(replacement),
+			History: a.sessions.Messages(replacement),
+		})
+	}
+
 	a.broadcast(Event{Type: "sessions", Sessions: a.sessions.List()})
 }
 

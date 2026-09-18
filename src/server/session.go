@@ -129,6 +129,12 @@ func (m *Manager) BeginNew() *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	session := m.newSessionLocked()
+	m.current = session
+	return session
+}
+
+func (m *Manager) newSessionLocked() *Session {
 	session := &Session{
 		ID:        time.Now().Format("2006-01-02_15-04-05"),
 		CreatedAt: time.Now().UnixMilli(),
@@ -147,7 +153,6 @@ func (m *Manager) BeginNew() *Session {
 	}
 
 	m.index[session.ID] = session
-	m.current = session
 	return session
 }
 
@@ -284,26 +289,31 @@ func (m *Manager) File(sessionID, fileID string) (FileMeta, bool) {
 	return file, ok
 }
 
-// DeleteSession 删除整个会话目录（含里面的文件），当前会话不允许删除。
-func (m *Manager) DeleteSession(sessionID string) error {
+// DeleteSession 删除整个会话目录（含里面的文件）。
+// 如果删掉的是当前会话，会立刻建一个新会话并把新会话返回给调用方广播。
+func (m *Manager) DeleteSession(sessionID string) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if !sessionIDPattern.MatchString(sessionID) {
-		return fmt.Errorf("非法会话 ID")
-	}
-	if m.current != nil && m.current.ID == sessionID {
-		return fmt.Errorf("当前会话不能删除")
+		return nil, fmt.Errorf("非法会话 ID")
 	}
 	if _, ok := m.index[sessionID]; !ok {
-		return fmt.Errorf("会话不存在")
+		return nil, fmt.Errorf("会话不存在")
 	}
 
 	if err := os.RemoveAll(filepath.Join(m.root, sessionID)); err != nil {
-		return err
+		return nil, err
 	}
 	delete(m.index, sessionID)
-	return nil
+
+	var replacement *Session
+	if m.current != nil && m.current.ID == sessionID {
+		// 不能留下 current = nil 的空档，否则并发写入会崩
+		replacement = m.newSessionLocked()
+		m.current = replacement
+	}
+	return replacement, nil
 }
 
 // DeleteFile 标记文件已删除并返回它在磁盘上的路径，由调用方删除实体文件。

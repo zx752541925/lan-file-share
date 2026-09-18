@@ -41,7 +41,12 @@ type Hub struct {
 	unregister chan *Client
 	broadcast  chan []byte
 	countReq   chan chan int
-	numbersReq chan chan map[int]bool
+	numbersReq chan numbersRequest
+}
+
+type numbersRequest struct {
+	exclude string
+	reply   chan map[int]bool
 }
 
 func NewHub() *Hub {
@@ -51,7 +56,7 @@ func NewHub() *Hub {
 		unregister: make(chan *Client),
 		broadcast:  make(chan []byte, 128),
 		countReq:   make(chan chan int),
-		numbersReq: make(chan chan map[int]bool),
+		numbersReq: make(chan numbersRequest),
 	}
 }
 
@@ -77,14 +82,16 @@ func (h *Hub) Run() {
 		case reply := <-h.countReq:
 			reply <- len(h.clients)
 
-		case reply := <-h.numbersReq:
+		case request := <-h.numbersReq:
 			used := make(map[int]bool, len(h.clients))
 			for client := range h.clients {
-				if client.number > 0 {
+				// 同一台设备（同一个设备 ID）的旧连接不算重号，
+				// 否则刷新页面时新旧连接重叠会导致自己被改名
+				if client.number > 0 && client.id != request.exclude {
 					used[client.number] = true
 				}
 			}
-			reply <- used
+			request.reply <- used
 		}
 	}
 }
@@ -99,10 +106,10 @@ func (h *Hub) Count() int {
 	return <-reply
 }
 
-// UsedNumbers 返回当前在线设备已经占用的昵称数字。
-func (h *Hub) UsedNumbers() map[int]bool {
+// UsedNumbers 返回当前在线设备已经占用的昵称数字，排除指定设备自己的连接。
+func (h *Hub) UsedNumbers(excludeClientID string) map[int]bool {
 	reply := make(chan map[int]bool, 1)
-	h.numbersReq <- reply
+	h.numbersReq <- numbersRequest{exclude: excludeClientID, reply: reply}
 	return <-reply
 }
 
