@@ -134,8 +134,10 @@ function formatStamp(ts) {
 }
 
 const extOf = (name) => (name.includes('.') ? name.split('.').pop().slice(0, 4).toUpperCase() : 'FILE');
-// 只有真实内容就是图片才内联预览（类型由服务端读文件头判定）
+// 只有真实内容就是图片/视频/音频才内联预览（类型由服务端读文件头判定）
 const isImage = (file) => (file.type || '').startsWith('image/');
+const isVideo = (file) => (file.type || '').startsWith('video/');
+const isAudio = (file) => (file.type || '').startsWith('audio/');
 
 // 头像显示昵称里的数字（海豚-27 → 27），没有数字就用首字（主机 → 主）
 function avatarText(name) {
@@ -171,6 +173,24 @@ function download(file) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+// 主机不需要"下载"：直接在新标签页里打开（视频/图片/PDF 都是内联预览）
+function openFile(file) {
+  window.open(url.file(state.session.id, file.id), '_blank');
+}
+
+// 主机专属：让服务端在资源管理器里定位到这个文件
+async function revealFile(file) {
+  try {
+    const res = await fetch(
+      `/api/reveal/${state.session.id}/${file.id}?host=${encodeURIComponent(hostToken)}`
+    );
+    const data = await res.json().catch(() => null);
+    showToast(res.ok ? '已在文件管理器中定位' : data?.error || '定位失败');
+  } catch {
+    showToast('定位失败');
+  }
 }
 
 /* ---------------- 文件面板：PC 折叠 / 手机抽屉 ---------------- */
@@ -379,14 +399,25 @@ function renderMessages() {
           parts.push(
             `<img class="msg-image" src="${esc(url.file(state.session.id, file.id))}" alt="${esc(file.name)}" data-open="${esc(file.id)}" />`
           );
+        } else if (isVideo(file)) {
+          parts.push(
+            `<video class="msg-video" src="${esc(url.file(state.session.id, file.id))}" controls preload="metadata" playsinline></video>`
+          );
+        } else if (isAudio(file)) {
+          parts.push(
+            `<audio class="msg-audio" src="${esc(url.file(state.session.id, file.id))}" controls preload="metadata"></audio>`
+          );
         } else {
-          parts.push(`<div class="file-card" data-download="${esc(file.id)}">
+          parts.push(`<div class="file-card" data-file="${esc(file.id)}">
               ${thumbHtml(file)}
               <span class="file-meta">
                 <span class="file-name">${esc(file.name)}</span>
                 <span class="file-sub">${formatSize(file.size)}</span>
               </span>
-              <span class="download-tag">下载</span>
+              ${state.host
+                ? `<button type="button" class="card-btn" data-reveal="${esc(file.id)}" title="在文件夹中定位">定位</button>
+                   <span class="download-tag">打开</span>`
+                : '<span class="download-tag">下载</span>'}
             </div>`);
         }
       }
@@ -427,6 +458,16 @@ function renderFiles() {
             <span class="file-name">${esc(file.name)}</span>
             <span class="file-sub">${formatSize(file.size)}${file.from ? ` · 来自 ${esc(file.from)}` : ''}</span>
           </span>
+          ${
+            state.host
+              ? `<button type="button" class="file-btn" data-reveal="${esc(file.id)}" title="在文件夹中定位">
+                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                     <path d="M4 7a2 2 0 0 1 2-2h3.5l2 2.5H18a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+                     <path d="M12 11v5m0 0l-2-2m2 2l2-2" />
+                   </svg>
+                 </button>`
+              : ''
+          }
           ${
             state.host
               ? `<button type="button" class="file-del" data-id="${esc(file.id)}" title="删除文件" aria-label="删除文件">
@@ -741,6 +782,14 @@ for (const picker of [el.pickTop, el.pickChat]) {
 el.attachBtn.addEventListener('click', () => el.pickChat.click());
 
 el.fileList.addEventListener('click', (event) => {
+  const reveal = event.target.closest('[data-reveal]');
+  if (reveal) {
+    event.stopPropagation();
+    const file = findFile(reveal.dataset.reveal);
+    if (file) revealFile(file);
+    return;
+  }
+
   const remove = event.target.closest('.file-del');
   if (remove) {
     event.stopPropagation();
@@ -751,19 +800,35 @@ el.fileList.addEventListener('click', (event) => {
   const item = event.target.closest('.file-item');
   if (!item) return;
   const file = findFile(item.dataset.download);
-  if (file) download(file);
+  if (!file) return;
+  if (state.host) openFile(file);
+  else download(file);
 });
 
 document.addEventListener('click', (event) => {
-  const downloadTarget = event.target.closest('[data-download]');
-  if (downloadTarget && !event.target.closest('.file-del')) {
-    const file = findFile(downloadTarget.dataset.download);
-    if (file) download(file);
+  if (event.target.closest('#fileList')) return; // 文件列表面板有自己的处理
+
+  const reveal = event.target.closest('[data-reveal]');
+  if (reveal) {
+    const file = findFile(reveal.dataset.reveal);
+    if (file) revealFile(file);
     return;
   }
 
   const image = event.target.closest('[data-open]');
-  if (image) window.open(url.file(state.session.id, image.dataset.open), '_blank');
+  if (image) {
+    window.open(url.file(state.session.id, image.dataset.open), '_blank');
+    return;
+  }
+
+  const target = event.target.closest('[data-file], [data-download]');
+  if (target && !event.target.closest('.file-del')) {
+    const id = target.dataset.file || target.dataset.download;
+    const file = findFile(id);
+    if (!file) return;
+    if (state.host) openFile(file);
+    else download(file);
+  }
 });
 
 el.userBtn.addEventListener('click', () => {

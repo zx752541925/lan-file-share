@@ -7,11 +7,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 const maxStoredMessages = 500
+
+// manifestName 是会话目录里给人看的文件对照表：
+// 磁盘文件名是随机 ID，这份清单列出原始文件名，方便在资源管理器里认人。
+const manifestName = "文件清单.txt"
 
 var sessionIDPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?$`)
 
@@ -304,6 +309,19 @@ func (m *Manager) Files(session *Session) []FileMeta {
 	return files
 }
 
+// MessageForFile 判断某个文件是否已经被某条消息引用（用于去重）。
+func (m *Manager) MessageForFile(fileID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, message := range m.current.Messages {
+		if message.File != nil && message.File.ID == fileID {
+			return true
+		}
+	}
+	return false
+}
+
 // DeleteSession 删除整个会话目录（含里面的文件）。
 // 如果删掉的是当前会话，会立刻建一个新会话并把新会话返回给调用方广播。
 func (m *Manager) DeleteSession(sessionID string) (*Session, error) {
@@ -406,5 +424,52 @@ func (m *Manager) persistLocked(session *Session) error {
 	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+
+	m.writeManifestLocked(session)
+	return nil
+}
+
+// writeManifestLocked 生成/刷新「文件清单.txt」，方便直接在文件夹里找文件。
+func (m *Manager) writeManifestLocked(session *Session) {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "会话：%s\r\n", session.ID)
+	fmt.Fprintf(&builder, "更新时间：%s\r\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(&builder, "说明：uploads 目录里的文件名就是最后一列的「文件 ID」，原始文件名见第一列\r\n\r\n")
+	fmt.Fprintf(&builder, "原始文件名\t大小\t上传者\t文件 ID\r\n")
+
+	for _, file := range session.Files {
+		if file.Deleted {
+			continue
+		}
+		from := file.From
+		if from == "" {
+			from = "-"
+		}
+		fmt.Fprintf(&builder, "%s\t%s\t%s\t%s\r\n",
+			sanitizeCell(file.Name), humanSize(file.Size), sanitizeCell(from), file.ID)
+	}
+
+	_ = os.WriteFile(filepath.Join(m.root, session.ID, manifestName), []byte(builder.String()), 0o644)
+}
+
+func sanitizeCell(value string) string {
+	value = strings.ReplaceAll(value, "\t", " ")
+	value = strings.ReplaceAll(value, "\r", " ")
+	return strings.ReplaceAll(value, "\n", " ")
+}
+
+func humanSize(size int64) string {
+	switch {
+	case size < 1024:
+		return fmt.Sprintf("%d B", size)
+	case size < 1024*1024:
+		return fmt.Sprintf("%.0f KB", float64(size)/1024)
+	case size < 1024*1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+	default:
+		return fmt.Sprintf("%.2f GB", float64(size)/(1024*1024*1024))
+	}
 }

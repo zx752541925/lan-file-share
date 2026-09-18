@@ -2,18 +2,18 @@ package main
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -54,7 +54,7 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		conn: conn,
 		send: make(chan []byte, 64),
 		id:   newID(),
-		host: a.isHost(r),
+		host: a.auth.IsHost(r),
 	}
 	if client.host {
 		client.name = hostName
@@ -65,23 +65,6 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer func() { a.hub.unregister <- client }()
 
 	a.serveClient(client)
-}
-
-// isHost 判定连接是否来自启动服务的这台机器：
-// 优先看启动时打印的主机口令，其次看是否从本机回环地址连进来。
-func (a *App) isHost(r *http.Request) bool {
-	if token := r.URL.Query().Get("host"); token != "" {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(a.hostToken)) == 1 {
-			return true
-		}
-	}
-
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func (a *App) serveClient(client *Client) {
@@ -214,6 +197,10 @@ func (a *App) handleChat(client *Client, incoming Incoming) {
 		if !ok {
 			return
 		}
+		// 兼容旧版页面：它在上传后还会再发一条带 fileId 的消息，会产生重复
+		if a.sessions.MessageForFile(meta.ID) {
+			return
+		}
 		message.File = &meta
 	}
 
@@ -246,6 +233,58 @@ func (a *App) handleDelete(fileID string) {
 	_ = os.Remove(path) // 磁盘实体一并删除
 	log.Printf("删除文件 %s", fileID)
 	a.broadcast(Event{Type: "deleted", FileID: fileID})
+}
+
+// handleReveal 让主机在资源管理器里定位到文件（仅主机可调用）。
+func (a *App) handleReveal(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IsHost(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能定位文件"})
+		return
+	}
+
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/reveal/"), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 || !sessionIDPattern.MatchString(parts[0]) || !isFileID(parts[1]) {
+		http.NotFound(w, r)
+		return
+	}
+
+	meta, ok := a.sessions.File(parts[0], parts[1])
+	if !ok || meta.Deleted {
+		http.NotFound(w, r)
+		return
+	}
+
+	path := filepath.Join(a.sessions.root, parts[0], "uploads", meta.ID)
+	if !fileExists(path) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不在磁盘上"})
+		return
+	}
+
+	if err := revealInFileManager(path); err != nil {
+		log.Printf("定位文件失败：%v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "已在文件管理器中定位"})
+}
+
+// revealInFileManager 调系统文件管理器选中该文件，只在主机本机生效。
+func revealInFileManager(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", "/select,"+path)
+	case "darwin":
+		cmd = exec.Command("open", "-R", path)
+	default:
+		cmd = exec.Command("xdg-open", filepath.Dir(path))
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("当前系统无法打开文件管理器")
+	}
+	return nil
 }
 
 func (a *App) handleDeleteSession(sessionID string) {
@@ -395,6 +434,10 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	if clientID == "" {
 		clientID = newID()
+	}
+	if sender == "" {
+		// 兼容旧版页面：上传时没带昵称，不要留空，否则头像会显示成「？」
+		sender = "未知设备"
 	}
 	meta.From = sender
 	a.sessions.AddFile(meta)

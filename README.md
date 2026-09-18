@@ -46,6 +46,7 @@ go run ./src/server -addr :41731 -max-mb 8192 -web ./src/web -data ./data
 | `POST /api/upload` | 表单字段 `file`，返回文件元数据 `{id,name,size,type}` |
 | `GET /api/files/{会话ID}/{文件ID}` | 在线预览，支持 Range 断点续传 |
 | `GET /api/files/{会话ID}/{文件ID}/download` | 带文件名下载（中文名用 RFC 5987 编码） |
+| `GET /api/reveal/{会话ID}/{文件ID}?host=口令` | 仅主机：在系统文件管理器里定位该文件 |
 
 ## 手机打不开？
 
@@ -89,6 +90,22 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | `data/sessions/<日期_时间>/` | 一个会话一个文件夹：`session.json` 存聊天与文件元数据，`uploads/` 存文件本体 |
 | `scripts/windows/portproxy.ps1` | Windows 10 下把端口映射进 WSL（用 exe 时不需要） |
 | `webassets.go` | 把 `src/web` 编译进二进制，供单文件分发 |
+| `src/server/auth.go` | 权限判定（目前只有"主机"角色），上公网时在这里扩展登录态 |
+
+## 文件存储
+
+- 文件实体存成 `uploads/<文件ID>`（随机 ID，不带后缀），原因：不同设备可能传同名文件、
+  防止文件名里的路径注入、避免中文/emoji 在各文件系统的编码差异
+- 每个会话目录里会生成一份 `文件清单.txt`，列出「原始文件名 / 大小 / 上传者 / 文件 ID」，
+  方便直接在资源管理器里对着找
+- 主机不需要下载：文件卡片对主机显示「打开」和「定位」（定位会在资源管理器中选中该文件），
+  图片、视频、音频在所有设备上都内联预览，其他设备下载时按原始文件名返回
+- 所有文件只存在主机磁盘上，其他设备只在浏览时放进浏览器缓存
+
+## 环境变量
+
+命令行参数优先，其次读环境变量，方便以后放进容器或公网：
+`LANFILE_ADDR`、`LANFILE_DATA`、`LANFILE_WEB`、`LANFILE_MAX_MB`。
 
 ## 会话与主机
 

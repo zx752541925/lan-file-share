@@ -2,8 +2,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"log"
 	"net"
@@ -14,6 +16,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,16 +26,17 @@ import (
 type App struct {
 	sessions  *Manager
 	hub       *Hub
+	auth      *Auth
 	maxUpload int64
-	hostToken string
 	port      string
 }
 
 func main() {
-	addr := flag.String("addr", ":41730", "监听地址")
-	webDir := flag.String("web", "", "前端目录（默认：项目内 src/web，否则用编译进程序的内置页面）")
-	dataDir := flag.String("data", "", "数据目录（默认：项目根目录或 exe 同级的 data）")
-	maxMB := flag.Int64("max-mb", 4096, "单个文件大小上限（MB）")
+	// 配置集中在这里：命令行参数优先，其次环境变量（方便以后放进容器/公网）
+	addr := flag.String("addr", envOr("LANFILE_ADDR", ":41730"), "监听地址（可用环境变量 LANFILE_ADDR）")
+	webDir := flag.String("web", envOr("LANFILE_WEB", ""), "前端目录（默认：项目内 src/web，否则用内置页面）")
+	dataDir := flag.String("data", envOr("LANFILE_DATA", ""), "数据目录（默认：项目根目录或 exe 同级的 data）")
+	maxMB := flag.Int64("max-mb", envIntOr("LANFILE_MAX_MB", 4096), "单个文件大小上限（MB）")
 	openBrowser := flag.Bool("open", true, "启动后自动打开浏览器")
 	flag.Parse()
 
@@ -51,22 +55,25 @@ func main() {
 	}
 	sessions.BeginNew()
 
+	hostToken := loadOrCreateToken(filepath.Join(*dataDir, "host-token.txt"))
 	app := &App{
 		sessions:  sessions,
 		hub:       NewHub(),
+		auth:      NewAuth(hostToken),
 		maxUpload: *maxMB << 20,
-		hostToken: loadOrCreateToken(filepath.Join(*dataDir, "host-token.txt")),
 		port:      portOf(*addr),
 	}
 	go app.hub.Run()
 
 	pages, source := webAssets(*webDir)
+	version := assetsVersion(pages)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", app.handleWS)
 	mux.HandleFunc("/api/upload", app.handleUpload)
 	mux.HandleFunc("/api/files/", app.handleFile)
-	mux.Handle("/", staticHandler(pages))
+	mux.HandleFunc("/api/reveal/", app.handleReveal)
+	mux.Handle("/", staticHandler(pages, version))
 
 	server := &http.Server{
 		Addr:              *addr,
@@ -74,7 +81,7 @@ func main() {
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
-	hostURL := fmt.Sprintf("http://localhost:%s/?host=%s", app.port, app.hostToken)
+	hostURL := fmt.Sprintf("http://localhost:%s/?host=%s", app.port, hostToken)
 	printBanner(source, *dataDir, app.port, hostURL)
 
 	if *openBrowser {
@@ -185,7 +192,7 @@ func webAssets(dir string) (fs.FS, string) {
 }
 
 // staticHandler 提供前端静态文件，未知路径回落到 index.html。
-func staticHandler(fsys fs.FS) http.Handler {
+func staticHandler(fsys fs.FS, version string) http.Handler {
 	fileServer := http.FileServerFS(fsys)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,11 +201,48 @@ func staticHandler(fsys fs.FS) http.Handler {
 			path = "index.html"
 		}
 		if _, err := fsys.Open(path); err != nil {
+			path = "index.html"
 			r.URL.Path = "/"
 		}
 		w.Header().Set("Cache-Control", "no-cache")
+
+		// 首页里把 __V__ 换成资源版本号，更新程序后浏览器不会再拿旧的 js/css
+		if path == "index.html" {
+			if raw, err := fs.ReadFile(fsys, "index.html"); err == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write(bytes.ReplaceAll(raw, []byte("__V__"), []byte(version)))
+				return
+			}
+		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// assetsVersion 用前端文件内容算出版本号，内容不变则版本号不变。
+func assetsVersion(fsys fs.FS) string {
+	hash := fnv.New64a()
+	for _, name := range []string{"index.html", "styles.css", "app.js"} {
+		if raw, err := fs.ReadFile(fsys, name); err == nil {
+			_, _ = hash.Write(raw)
+		}
+	}
+	return strconv.FormatUint(hash.Sum64(), 36)
+}
+
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envIntOr(key string, fallback int64) int64 {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func printBanner(pageSource, dataDir, port, hostURL string) {
