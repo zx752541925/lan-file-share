@@ -1130,6 +1130,44 @@ if (supportsDragDrop) {
     hideDropOverlay();
   });
 
+  // 截图后 Ctrl+V：剪贴板里的图片直接当文件上传，链路与拖拽完全相同
+  const shotExt = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+  };
+
+  function asScreenshot(file, index) {
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const name = `截图-${stamp}${index > 0 ? `-${index + 1}` : ''}.${shotExt[file.type] || 'png'}`;
+    try {
+      return new File([file], name, { type: file.type || 'image/png', lastModified: Date.now() });
+    } catch {
+      return file; // 不支持 File 构造器时退回原名（浏览器一般会给 image.png）
+    }
+  }
+
+  document.addEventListener('paste', (event) => {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+
+    const pasted = [];
+    for (const item of items) {
+      if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+      const file = item.getAsFile();
+      if (file) pasted.push(asScreenshot(file, pasted.length));
+    }
+    if (!pasted.length) return; // 剪贴板里没有图片，文本照常粘贴
+
+    event.preventDefault();
+    showToast(pasted.length > 1 ? `已粘贴 ${pasted.length} 张图片，正在上传` : '已粘贴图片，正在上传');
+    handleFiles(pasted);
+  });
+
   el.dropOverlay.addEventListener('click', hideDropOverlay);
   window.addEventListener('blur', hideDropOverlay);
 }
