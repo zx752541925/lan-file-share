@@ -1,0 +1,42 @@
+# 局域网文件传输服务（lanfile）的 systemd 单元
+#
+# 部署位置：/etc/systemd/system/lanfile.service
+# 安装/更新：运行 scripts/deploy.sh 会自动上传并 daemon-reload
+# 手动生效：systemctl daemon-reload && systemctl restart lanfile
+# 运行用户：专用系统用户 lanfile（无登录 shell），由 deploy.sh 创建
+# 二进制：  /opt/lanfile/lanfile-server（上一版保留为 lanfile-server.bak，回滚只需换回来并 restart）
+# 数据目录：/var/lib/lanfile（聊天记录、上传的文件、主机口令都在这，备份 = 打包这个目录）
+
+[Unit]
+Description=局域网文件传输服务（lanfile）
+Documentation=https://github.com/zx752541925/lan-file-share
+# 等网络真正就绪再启动，否则启动横幅里打印不出局域网地址
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lanfile
+Group=lanfile
+
+# 参数说明：
+#   -addr 127.0.0.1:41730  只监听回环，公网必须经 nginx 反代进来，外部无法绕过入口直连
+#   -data /var/lib/lanfile 数据与二进制分离，重装/升级不影响会话数据
+#   -open=false            服务器没有图形界面，不需要自动打开浏览器
+#   -max-mb 500            单个文件上限 500MB（公网场景，按需调整；改完要 restart）
+ExecStart=/opt/lanfile/lanfile-server -addr 127.0.0.1:41730 -data /var/lib/lanfile -open=false -max-mb 500
+
+# 进程崩溃、被杀、被 OOM 后 3 秒自动拉起（常驻服务）
+Restart=always
+RestartSec=3
+
+# 沙箱限制：禁止提权，独立 /tmp，整个文件系统只读，看不到其他用户的家目录，
+# 只允许写数据目录 —— 万一本服务被攻破，影响范围仅限 /var/lib/lanfile
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/lanfile
+
+[Install]
+WantedBy=multi-user.target
