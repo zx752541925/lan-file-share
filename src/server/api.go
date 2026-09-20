@@ -45,16 +45,27 @@ type Incoming struct {
 }
 
 func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
+	identity := a.auth.IdentityOf(nil, r) // entry() 已校验过，这里取身份用于记录设备
+	if !identity.Valid() {
+		http.Error(w, "需要主机邀请", http.StatusForbidden)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 
 	client := &Client{
-		conn: conn,
-		send: make(chan []byte, 64),
-		id:   newID(),
-		host: a.auth.IsHost(r),
+		conn:        conn,
+		send:        make(chan []byte, 64),
+		id:          newID(),
+		host:        identity.IsHost(),
+		deviceKey:   identity.DeviceKey(),
+		inviteID:    identity.InviteID,
+		ip:          identity.IP,
+		ua:          identity.UA,
+		connectedAt: time.Now().UnixMilli(),
 	}
 	if client.host {
 		client.name = hostName
@@ -144,6 +155,7 @@ func (a *App) applyIdentity(client *Client, incoming Incoming) {
 	name := strings.TrimSpace(incoming.Name)
 	if name == "" {
 		a.assignDefaultName(client)
+		a.auth.SetDeviceName(client.deviceKey, client.name)
 		a.replySelf(client)
 		return
 	}
@@ -157,6 +169,7 @@ func (a *App) applyIdentity(client *Client, incoming Incoming) {
 			client.number = number
 		}
 	}
+	a.auth.SetDeviceName(client.deviceKey, client.name)
 	a.replySelf(client)
 }
 
@@ -237,7 +250,7 @@ func (a *App) handleDelete(fileID string) {
 
 // handleReveal 让主机在资源管理器里定位到文件（仅主机可调用）。
 func (a *App) handleReveal(w http.ResponseWriter, r *http.Request) {
-	if !a.auth.IsHost(r) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能定位文件"})
 		return
 	}
@@ -327,6 +340,187 @@ func (a *App) broadcast(event Event) {
 		return
 	}
 	a.hub.Send(payload)
+}
+
+/* ---------------- 身份、链接与邀请（服务器版） ---------------- */
+
+// handleWhoami 返回当前请求的身份，前端判断与排查都用得上。
+func (a *App) handleWhoami(w http.ResponseWriter, r *http.Request) {
+	identity := a.auth.IdentityOf(nil, r)
+
+	payload := map[string]any{
+		"role": string(identity.Role),
+		"host": identity.IsHost(),
+		"ip":   identity.IP,
+		"ua":   identity.UA,
+	}
+	if identity.Valid() {
+		payload["deviceKey"] = identity.DeviceKey()
+	}
+	if identity.InviteID != "" {
+		payload["inviteId"] = identity.InviteID
+		if invite, ok := a.auth.Invite(identity.InviteID); ok {
+			payload["note"] = invite.Note
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// handleHostLink 重新生成一张一次性主机链接（旧的立即作废），仅主机可调用。
+// 用途：换设备、清了浏览器缓存、或原链接被人抢先用掉。
+func (a *App) handleHostLink(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能生成主机链接"})
+		return
+	}
+
+	base := strings.TrimRight(a.baseURLFor(r), "/")
+
+	// ?read=1 只读当前链接（可能已经被用过，此时返回空串），不生成新的
+	if r.URL.Query().Has("read") {
+		key := a.auth.HostKey()
+		url := ""
+		if key != "" {
+			url = fmt.Sprintf("%s/?host=%s", base, key)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"key": key, "url": url})
+		return
+	}
+
+	key := a.auth.RotateHostKey()
+	log.Printf("主机重新生成了一次性链接（%s）", clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]string{
+		"key": key,
+		"url": fmt.Sprintf("%s/?host=%s", base, key),
+	})
+}
+
+// handleInvites：GET 列出邀请，POST 生成一张新邀请（body: {"note":"张三"}）。
+func (a *App) handleInvites(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能管理邀请"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		list := a.auth.ListInvites()
+		base := a.baseURLFor(r)
+		out := make([]map[string]any, 0, len(list))
+		for _, invite := range list {
+			out = append(out, inviteView(invite, base))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"invites": out})
+
+	case http.MethodPost:
+		var body struct {
+			Note string `json:"note"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body)
+
+		invite := a.auth.CreateInvite(body.Note)
+		log.Printf("主机生成邀请链接「%s」", invite.Note)
+		writeJSON(w, http.StatusOK, inviteView(invite, a.baseURLFor(r)))
+
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleInviteByID：DELETE 撤销某张邀请，绑定它的访客下一次请求即被拒绝。
+func (a *App) handleInviteByID(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能管理邀请"})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/invites/"), "/")
+	if !a.auth.RevokeInvite(id) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "邀请不存在"})
+		return
+	}
+	log.Printf("主机撤销了邀请 %s", id)
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "已撤销"})
+}
+
+// handleDevices 返回在线与最近上线过的设备，仅主机可见。
+func (a *App) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能查看设备"})
+		return
+	}
+
+	online := make(map[string]ClientInfo)
+	for _, client := range a.hub.Devices() {
+		online[client.Key] = client
+	}
+
+	devices := make([]map[string]any, 0, len(online))
+	for _, seen := range a.auth.Devices() {
+		entry := map[string]any{
+			"key": seen.Key, "role": string(seen.Role), "name": seen.Name,
+			"inviteId": seen.InviteID, "note": seen.Note, "ip": seen.IP, "ua": seen.UA,
+			"firstSeen": seen.FirstAt, "lastSeen": seen.LastAt, "online": false,
+		}
+		if client, ok := online[seen.Key]; ok {
+			entry["online"] = true
+			if client.Name != "" {
+				entry["name"] = client.Name
+			}
+			entry["connectedAt"] = client.ConnectedAt
+			delete(online, seen.Key)
+		}
+		devices = append(devices, entry)
+	}
+	// 兜底：已连上但还没写入设备记录的连接
+	for _, client := range online {
+		devices = append(devices, map[string]any{
+			"key": client.Key, "role": roleName(client.Host), "name": client.Name,
+			"ip": client.IP, "ua": client.UA, "online": true, "connectedAt": client.ConnectedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"peers":   a.hub.Count(),
+		"devices": devices,
+	})
+}
+
+func roleName(host bool) string {
+	if host {
+		return string(RoleHost)
+	}
+	return string(RoleGuest)
+}
+
+// inviteView 是给前端的邀请视图：加上可直接发出去的链接。
+func inviteView(invite Invite, base string) map[string]any {
+	return map[string]any{
+		"id":        invite.ID,
+		"note":      invite.Note,
+		"status":    invite.Status,
+		"createdAt": invite.CreatedAt,
+		"expiresAt": invite.ExpiresAt,
+		"usedAt":    invite.UsedAt,
+		"lastSeen":  invite.LastSeen,
+		"url":       fmt.Sprintf("%s/?invite=%s", strings.TrimRight(base, "/"), invite.ID),
+	}
+}
+
+// baseURLFor 生成链接用的对外地址：优先用 -public-url，否则按当前请求推导。
+func (a *App) baseURLFor(r *http.Request) string {
+	if a.publicURL != "" {
+		return a.publicURL
+	}
+	scheme := "http"
+	if requestIsHTTPS(r) {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
 
 func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {

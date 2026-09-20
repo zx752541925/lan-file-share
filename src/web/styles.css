@@ -814,6 +814,132 @@ body.files-open .panel-files { transform: none; }
 
 .btn-danger { border-color: transparent; background: var(--danger); color: #fff; font-weight: 600; }
 
+/* ---------------- 主机链接与邀请 ---------------- */
+.link-section {
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.link-section:first-of-type { border-top: 0; padding-top: 4px; }
+
+.link-section h4 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.link-hint { font-size: 11px; font-weight: 400; color: var(--muted); }
+
+.link-row { display: flex; gap: 8px; }
+
+.link-input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.link-input:read-only { color: var(--muted); }
+
+.link-actions { margin-top: 10px; }
+
+.btn-primary {
+  height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:active { opacity: 0.85; }
+
+.qr-box.mini { margin-top: 12px; padding: 8px; }
+.qr-box.mini:empty { display: none; }
+.qr-box.mini svg { max-width: 150px; }
+
+.invite-list, .device-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.invite-item, .device-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.invite-item:hover, .device-item:hover { background: var(--panel-soft); }
+
+.invite-main, .device-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+
+.invite-title, .device-title { font-size: 13px; }
+
+.invite-sub, .device-sub {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invite-status {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.invite-status.pending { background: var(--accent-soft); color: var(--accent); }
+.invite-status.revoked, .invite-status.expired { background: rgba(229, 72, 77, 0.12); color: var(--danger); }
+
+.invite-copy, .invite-revoke {
+  flex: none;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.invite-copy { padding: 0 10px; }
+.invite-revoke { width: 30px; font-size: 16px; line-height: 1; }
+.invite-revoke:hover { color: var(--danger); border-color: var(--danger); }
+
+.device-state {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.device-state.on { background: rgba(34, 197, 94, 0.14); color: #16a34a; }
+
 /* ---------------- 拖拽遮罩 / 提示 ---------------- */
 .drop-overlay {
   position: fixed;

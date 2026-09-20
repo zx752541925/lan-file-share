@@ -65,8 +65,8 @@ systemctl restart lanfile
 sleep 1                                     # 稍等再探活
 echo "服务状态: \$(systemctl is-active lanfile)"
 echo "监听端口:"; ss -tlnp | grep 41730 || echo "  (没监听，检查日志)"
-echo "本机探活:"; curl -sI 127.0.0.1:41730 | head -1
+echo "本机探活（403 = 服务正常，且已开启准入校验）:"; curl -sI 127.0.0.1:41730 | head -1
 REMOTE
 
-echo "==> 最近日志"
-ssh "$DEPLOY_HOST" "journalctl -u lanfile -n 8 --no-pager"
+echo "==> 最近日志与主机入口"
+ssh "$DEPLOY_HOST" "journalctl -u lanfile -n 10 --no-pager | grep -E '主机入口|准入模式|服务已启动|error|错误' || journalctl -u lanfile -n 5 --no-pager"

@@ -32,6 +32,24 @@ type Client struct {
 	host bool
 	// number 是访客昵称里的数字，用来保证同时在线设备不重号
 	number int
+	// 以下字段用于主机页面的「在线设备」列表
+	deviceKey   string // 主机固定 "host"，访客为凭证 ID
+	inviteID    string // 访客来源邀请码（主机为空）
+	ip          string
+	ua          string
+	connectedAt int64
+}
+
+// ClientInfo 是给「在线设备」列表用的连接快照。
+type ClientInfo struct {
+	Key         string
+	ID          string
+	Name        string
+	Host        bool
+	InviteID    string
+	IP          string
+	UA          string
+	ConnectedAt int64
 }
 
 // Hub 维护所有连接，并按顺序处理注册、注销与广播。
@@ -42,6 +60,7 @@ type Hub struct {
 	broadcast  chan []byte
 	countReq   chan chan int
 	numbersReq chan numbersRequest
+	devicesReq chan chan []ClientInfo
 }
 
 type numbersRequest struct {
@@ -57,6 +76,7 @@ func NewHub() *Hub {
 		broadcast:  make(chan []byte, 128),
 		countReq:   make(chan chan int),
 		numbersReq: make(chan numbersRequest),
+		devicesReq: make(chan chan []ClientInfo),
 	}
 }
 
@@ -92,6 +112,22 @@ func (h *Hub) Run() {
 				}
 			}
 			request.reply <- used
+
+		case reply := <-h.devicesReq:
+			list := make([]ClientInfo, 0, len(h.clients))
+			for client := range h.clients {
+				list = append(list, ClientInfo{
+					Key:         client.deviceKey,
+					ID:          client.id,
+					Name:        client.name,
+					Host:        client.host,
+					InviteID:    client.inviteID,
+					IP:          client.ip,
+					UA:          client.ua,
+					ConnectedAt: client.connectedAt,
+				})
+			}
+			reply <- list
 		}
 	}
 }
@@ -103,6 +139,13 @@ func (h *Hub) Send(payload []byte) {
 func (h *Hub) Count() int {
 	reply := make(chan int, 1)
 	h.countReq <- reply
+	return <-reply
+}
+
+// Devices 返回当前在线连接的快照（供主机页面显示）。
+func (h *Hub) Devices() []ClientInfo {
+	reply := make(chan []ClientInfo, 1)
+	h.devicesReq <- reply
 	return <-reply
 }
 

@@ -42,6 +42,13 @@
           </svg>
           <span>历史会话</span>
         </button>
+        <button type="button" class="top-btn" id="linkBtn" title="主机链接与邀请" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" />
+            <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+          </svg>
+          <span>链接</span>
+        </button>
         <button type="button" class="user-btn" id="userBtn" title="点击修改昵称">
           <span class="avatar" id="userAvatar">我</span>
           <span id="userName">我的设备</span>
@@ -147,6 +154,43 @@
         <button type="button" class="btn-danger" id="confirmOk">删除</button>
       </div>
       <p class="modal-tip">文件会从磁盘删除，聊天里显示为「已删除」</p>
+    </div>
+  </div>
+
+  <div class="modal" id="linkModal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>主机链接与邀请</h3>
+        <button type="button" class="modal-close" data-close aria-label="关闭">×</button>
+      </div>
+
+      <section class="link-section">
+        <h4>主机链接<span class="link-hint">一次性，用过即失效</span></h4>
+        <div class="link-row">
+          <input class="link-input" id="hostLinkInput" readonly />
+          <button type="button" class="btn-ghost" id="hostLinkCopy">复制</button>
+        </div>
+        <div class="link-actions">
+          <button type="button" class="btn-primary" id="hostLinkRotate">重新生成（旧的作废）</button>
+        </div>
+        <div class="qr-box mini" id="hostQrBox"></div>
+        <p class="modal-tip">换电脑、清了浏览器缓存时，重新生成一张、在新设备上打开即可拿回主机身份。</p>
+      </section>
+
+      <section class="link-section">
+        <h4>邀请别人加入<span class="link-hint">一人一码，24 小时内有效</span></h4>
+        <div class="link-row">
+          <input class="link-input" id="inviteNote" placeholder="备注，例如「张三」" maxlength="16" />
+          <button type="button" class="btn-primary" id="inviteCreate">生成邀请</button>
+        </div>
+        <p class="modal-tip">谁先打开就绑定谁，链接转发给别人打不开；撤销后对方立刻被挡在门外。</p>
+        <ul class="invite-list" id="inviteList"></ul>
+      </section>
+
+      <section class="link-section">
+        <h4>在线设备<span class="link-hint">最近上线的记录，重启后清空</span></h4>
+        <ul class="device-list" id="deviceList"></ul>
+      </section>
     </div>
   </div>
 

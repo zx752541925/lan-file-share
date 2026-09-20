@@ -24,7 +24,11 @@ Group=lanfile
 #   -data /var/lib/lanfile 数据与二进制分离，重装/升级不影响会话数据
 #   -open=false            服务器没有图形界面，不需要自动打开浏览器
 #   -max-mb 500            单个文件上限 500MB（公网场景，按需调整；改完要 restart）
-ExecStart=/opt/lanfile/lanfile-server -addr 127.0.0.1:41730 -data /var/lib/lanfile -open=false -max-mb 500
+#   -public-url            生成主机/邀请链接用的对外地址（nginx 入口）
+#   -trust-loopback=false  经 nginx 转发后所有请求都来自回环，必须关掉「回环即主机」，
+#                          否则任何访客都会被当成主机
+#   -host-cookie-days / -guest-cookie-days / -invite-ttl-hours  准入有效期（滑动续期）
+ExecStart=/opt/lanfile/lanfile-server -addr 127.0.0.1:41730 -data /var/lib/lanfile -open=false -max-mb 500 -public-url http://8.138.247.252:8080 -trust-loopback=false -host-cookie-days 30 -guest-cookie-days 7 -invite-ttl-hours 24
 
 # 进程崩溃、被杀、被 OOM 后 3 秒自动拉起（常驻服务）
 Restart=always

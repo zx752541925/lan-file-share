@@ -30,6 +30,16 @@ const el = {
   qrAlts: document.getElementById('qrAlts'),
   sessionModal: document.getElementById('sessionModal'),
   sessionList: document.getElementById('sessionList'),
+  linkBtn: document.getElementById('linkBtn'),
+  linkModal: document.getElementById('linkModal'),
+  hostLinkInput: document.getElementById('hostLinkInput'),
+  hostLinkCopy: document.getElementById('hostLinkCopy'),
+  hostLinkRotate: document.getElementById('hostLinkRotate'),
+  hostQrBox: document.getElementById('hostQrBox'),
+  inviteNote: document.getElementById('inviteNote'),
+  inviteCreate: document.getElementById('inviteCreate'),
+  inviteList: document.getElementById('inviteList'),
+  deviceList: document.getElementById('deviceList'),
   confirmModal: document.getElementById('confirmModal'),
   confirmText: document.getElementById('confirmText'),
   confirmOk: document.getElementById('confirmOk'),
@@ -48,15 +58,9 @@ const url = {
 const isDesktop = () => window.matchMedia('(min-width: 900px)').matches;
 const isMobileLayout = () => window.matchMedia('(max-width: 899px)').matches;
 
-// 主机口令只出现在服务启动时自动打开的地址里，用于判定"谁启动的服务谁就是主机"
-const hostToken =
-  new URLSearchParams(location.search).get('host') || localStorage.getItem('lanfile.host') || '';
-if (hostToken) {
-  localStorage.setItem('lanfile.host', hostToken);
-  const clean = new URL(location.href);
-  clean.searchParams.delete('host');
-  history.replaceState(null, '', clean.pathname + clean.search + clean.hash);
-}
+// 身份由服务端 cookie 决定（主机链接 ?host= / 邀请链接 ?invite= 在服务端兑换成 cookie，
+// 然后 302 把参数抹掉）。旧版本把主机口令存在 localStorage 里，这里顺手清掉。
+localStorage.removeItem('lanfile.host');
 
 // 设备 ID：长期存在浏览器里，刷新或重开页面仍是同一台设备，
 // 这样自己的历史消息刷新后依然显示在右边
@@ -85,6 +89,9 @@ const state = {
   qrUrl: '',
   messages: [],
   uploads: [],
+  hostLink: '',
+  invites: [],
+  devices: [],
 };
 
 // 旧版本的自动昵称（我的电脑-3F）作废，交给服务端重新分配
@@ -213,9 +220,7 @@ function openFile(file) {
 // 主机专属：让服务端在资源管理器里定位到这个文件
 async function revealFile(file) {
   try {
-    const res = await fetch(
-      `/api/reveal/${state.session.id}/${file.id}?host=${encodeURIComponent(hostToken)}`
-    );
+    const res = await fetch(`/api/reveal/${state.session.id}/${file.id}`);
     const data = await res.json().catch(() => null);
     showToast(res.ok ? '已在文件管理器中定位' : data?.error || '定位失败');
   } catch {
@@ -350,8 +355,8 @@ function setConnected(connected) {
 
 function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const query = hostToken ? `?host=${encodeURIComponent(hostToken)}` : '';
-  socket = new WebSocket(`${scheme}://${location.host}/ws${query}`);
+  // 身份走 cookie，浏览器会自动带上；不再往 URL 里塞任何凭据
+  socket = new WebSocket(`${scheme}://${location.host}/ws`);
 
   socket.addEventListener('open', () => {
     retryDelay = 1000;
@@ -407,6 +412,8 @@ function connect() {
       case 'peers':
         state.peers = data.peers;
         renderStatus();
+        // 设备上下线时，若主机正开着「链接」浮窗就顺手刷新在线列表
+        if (state.host && !el.linkModal.hidden) loadDevices();
         break;
 
       case 'sessions':
@@ -452,6 +459,7 @@ function adoptName(name) {
 function renderSession() {
   el.sessionName.textContent = state.session ? formatSession(state.session.id) : '—';
   el.historyBtn.hidden = !state.host; // 只有主机能切换历史会话
+  el.linkBtn.hidden = !state.host; // 只有主机能看主机链接与邀请管理
 }
 
 function thumbHtml(file) {
@@ -686,6 +694,7 @@ function openModal(modal) {
 function closeModals() {
   el.qrModal.hidden = true;
   el.sessionModal.hidden = true;
+  el.linkModal.hidden = true;
   hideConfirm();
 }
 
@@ -786,6 +795,218 @@ document.addEventListener('keydown', (event) => {
 });
 
 /* ---------------- 交互 ---------------- */
+
+/* ---------------- 主机链接与邀请（仅主机可见） ---------------- */
+
+function qrSvg(text) {
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 4, margin: 1, scalable: true });
+  } catch {
+    return '<p class="empty-tip">二维码生成失败</p>';
+  }
+}
+
+async function copyText(text) {
+  if (!text) {
+    showToast('没有可复制的内容');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // 非 HTTPS 或旧浏览器没有 clipboard API：退回临时输入框
+    const temp = document.createElement('textarea');
+    temp.value = text;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand('copy');
+    temp.remove();
+  }
+  showToast('已复制到剪贴板');
+}
+
+async function apiJSON(url, options) {
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `请求失败（HTTP ${res.status}）`);
+  return data;
+}
+
+// 把 UA 压成人看得懂的「Chrome/Windows」
+function shortUA(ua) {
+  const browser = /Edg\//.test(ua)
+    ? 'Edge'
+    : /Chrome\//.test(ua)
+      ? 'Chrome'
+      : /Firefox\//.test(ua)
+        ? 'Firefox'
+        : /Safari\//.test(ua)
+          ? 'Safari'
+          : '浏览器';
+  const os = /Windows/.test(ua)
+    ? 'Windows'
+    : /Android/.test(ua)
+      ? 'Android'
+      : /iPhone|iPad/.test(ua)
+        ? 'iOS'
+        : /Mac OS/.test(ua)
+          ? 'macOS'
+          : /Linux/.test(ua)
+            ? 'Linux'
+            : '';
+  return os ? `${browser}/${os}` : browser;
+}
+
+function setHostLink(url) {
+  state.hostLink = url || '';
+  el.hostLinkInput.value = url || '（当前链接已被使用，点下面按钮生成新的）';
+  el.hostQrBox.innerHTML = url ? qrSvg(url) : '';
+}
+
+async function loadHostLink() {
+  try {
+    const data = await apiJSON('/api/host/link?read=1');
+    setHostLink(data.url);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function inviteStatusClass(status) {
+  return { 待使用: 'pending', 已使用: 'used', 已撤销: 'revoked', 已过期: 'expired' }[status] || '';
+}
+
+function renderInvites() {
+  if (!state.invites.length) {
+    el.inviteList.innerHTML = '<li class="empty-tip">还没有发出邀请</li>';
+    return;
+  }
+
+  el.inviteList.innerHTML = state.invites
+    .map((invite) => {
+      const time = invite.usedAt
+        ? `使用于 ${formatStamp(invite.usedAt)}`
+        : `创建于 ${formatStamp(invite.createdAt)} · ${formatStamp(invite.expiresAt)} 过期`;
+      const activity = invite.lastSeen ? ` · 最近活动 ${formatStamp(invite.lastSeen)}` : '';
+
+      return `<li class="invite-item">
+          <span class="invite-main">
+            <span class="invite-title">
+              ${esc(invite.note || '未备注')}
+              <em class="invite-status ${inviteStatusClass(invite.status)}">${esc(invite.status)}</em>
+            </span>
+            <span class="invite-sub">${time}${activity}</span>
+          </span>
+          ${invite.status === '已撤销' ? '' : `<button type="button" class="invite-copy" data-copy="${esc(invite.url)}">复制</button>`}
+          <button type="button" class="invite-revoke" data-revoke="${esc(invite.id)}" title="撤销邀请" aria-label="撤销邀请">×</button>
+        </li>`;
+    })
+    .join('');
+}
+
+function renderDevices() {
+  if (!state.devices.length) {
+    el.deviceList.innerHTML = '<li class="empty-tip">暂无记录</li>';
+    return;
+  }
+
+  el.deviceList.innerHTML = state.devices
+    .map((device) => {
+      const title = device.name || (device.role === 'host' ? '主机' : '访客');
+      const note = device.note ? ` · ${esc(device.note)}` : '';
+      const last = device.lastSeen ? `最近活动 ${formatStamp(device.lastSeen)}` : '—';
+
+      return `<li class="device-item">
+          <span class="device-main">
+            <span class="device-title">${esc(title)}${note}</span>
+            <span class="device-sub">${esc(device.ip || '')}${device.ua ? ` · ${esc(shortUA(device.ua))}` : ''}</span>
+            <span class="device-sub">${last}</span>
+          </span>
+          <span class="device-state ${device.online ? 'on' : ''}">${device.online ? '在线' : '离线'}</span>
+        </li>`;
+    })
+    .join('');
+}
+
+async function loadInvites() {
+  try {
+    const data = await apiJSON('/api/invites');
+    state.invites = data.invites || [];
+    renderInvites();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function loadDevices() {
+  try {
+    const data = await apiJSON('/api/devices');
+    state.devices = data.devices || [];
+    renderDevices();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function openLinkModal() {
+  openModal(el.linkModal);
+  loadHostLink();
+  loadInvites();
+  loadDevices();
+}
+
+el.linkBtn.addEventListener('click', openLinkModal);
+
+el.hostLinkCopy.addEventListener('click', () => copyText(state.hostLink));
+
+el.hostLinkRotate.addEventListener('click', async () => {
+  try {
+    const data = await apiJSON('/api/host/link');
+    setHostLink(data.url);
+    showToast('已生成新链接，旧链接立即失效');
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+el.inviteCreate.addEventListener('click', async () => {
+  try {
+    const invite = await apiJSON('/api/invites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: el.inviteNote.value.trim() }),
+    });
+    el.inviteNote.value = '';
+    await loadInvites();
+    await copyText(invite.url); // 生成后直接复制，省一步操作
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+el.inviteList.addEventListener('click', async (event) => {
+  const copy = event.target.closest('[data-copy]');
+  if (copy) {
+    copyText(copy.dataset.copy);
+    return;
+  }
+
+  const revoke = event.target.closest('[data-revoke]');
+  if (!revoke) return;
+  if (!window.confirm('撤销这张邀请？对方下一次操作就会被挡在门外。')) return;
+
+  try {
+    await apiJSON(`/api/invites/${revoke.dataset.revoke}`, { method: 'DELETE' });
+    await loadInvites();
+    await loadDevices();
+    showToast('已撤销');
+  } catch (error) {
+    showToast(error.message);
+  }
+});
 
 function autoGrow() {
   el.input.style.height = 'auto';
