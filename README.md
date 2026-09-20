@@ -2,6 +2,34 @@
 
 PC 与手机浏览器打开同一地址，即可聊天、互传文件。服务只监听局域网，不依赖外网。
 
+## 版本说明
+
+同一个仓库里有两种形态，**代码同源**，差异只在「访问准入」和「会话语义」，不是两套代码：
+
+| 形态 | 位置 | 形态与行为 | 状态 |
+| --- | --- | --- | --- |
+| 本地版 | tag [`v1.0-local`](../../releases) | Windows 单文件 exe（`make build-windows`），局域网直连、无鉴权、**每次启动 = 一个新会话** | **已归档**，除修 bug 外不再演进 |
+| 服务器版 | `main` 分支 | Linux 静态二进制 + systemd 常驻（`make build-linux` + `scripts/deploy.sh`），只监听回环、经 nginx 入口访问 | 开发中，后续加入「仅主机邀请的人可进」 |
+
+### 从归档点继续开发本地版
+
+本地版归档在 tag `v1.0-local`，需要改它时从该 tag 拉分支，不要直接改 `main`：
+
+```bash
+git fetch --tags
+git switch -c local-fix v1.0-local   # 基于归档点拉分支
+make build-windows                   # 重新产出 dist/lanfile-server.exe
+```
+
+### 服务器版部署
+
+```bash
+make build-linux     # 静态编译（不依赖 glibc），产物 bin/lanfile-server-linux
+scripts/deploy.sh    # 上传 → 安装 systemd 单元 → 重启 → 回显状态与日志
+```
+
+服务器上以专用用户 `lanfile` 运行，只监听 `127.0.0.1:41730`，数据在 `/var/lib/lanfile`（与二进制分离，重装不丢会话）。细节见 [deploy/lanfile.service](deploy/lanfile.service) 与 [scripts/deploy.sh](scripts/deploy.sh)。
+
 ## 主要文件
 
 后端（Go）：
