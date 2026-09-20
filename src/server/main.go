@@ -30,6 +30,7 @@ type App struct {
 	maxUpload int64
 	port      string
 	publicURL string
+	base      string // 访问子路径，形如 / 或 /lanfile/（前后都有斜杠）
 }
 
 func main() {
@@ -38,6 +39,7 @@ func main() {
 	webDir := flag.String("web", envOr("LANFILE_WEB", ""), "前端目录（默认：项目内 src/web，否则用内置页面）")
 	dataDir := flag.String("data", envOr("LANFILE_DATA", ""), "数据目录（默认：项目根目录或 exe 同级的 data）")
 	maxMB := flag.Int64("max-mb", envIntOr("LANFILE_MAX_MB", 4096), "单个文件大小上限（MB）")
+	base := flag.String("base", envOr("LANFILE_BASE", "/"), "访问子路径（如 /lanfile/），用于 nginx 按路径分发多个服务；默认根路径")
 	publicURL := flag.String("public-url", envOr("LANFILE_PUBLIC_URL", ""), "对外访问地址，用于生成主机/邀请链接（如 http://1.2.3.4:8080，留空则用 localhost）")
 	trustLoopback := flag.Bool("trust-loopback", true, "本机（回环地址）访问直接视为主机；经 nginx 等反向代理时必须设为 false")
 	hostCookieDays := flag.Int("host-cookie-days", 30, "主机登录有效期（天，每次上线滑动续期）")
@@ -77,6 +79,7 @@ func main() {
 		maxUpload: *maxMB << 20,
 		port:      portOf(*addr),
 		publicURL: strings.TrimRight(*publicURL, "/"),
+		base:      normalizeBase(*base),
 	}
 	go app.hub.Run()
 
@@ -103,7 +106,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           app.entry(mux),
+		Handler:           app.withBase(app.entry(mux)),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
@@ -112,8 +115,8 @@ func main() {
 	if baseURL == "" {
 		baseURL = "http://localhost:" + app.port
 	}
-	hostURL := app.auth.HostLink(baseURL)
-	printBanner(source, *dataDir, app.port, hostURL, *trustLoopback)
+	hostURL := app.auth.HostLink(app.siteURL(baseURL))
+	printBanner(source, *dataDir, app.port, app.base, hostURL, *trustLoopback)
 
 	if *openBrowser {
 		go openInBrowser(hostURL)
@@ -276,10 +279,11 @@ func envIntOr(key string, fallback int64) int64 {
 	return fallback
 }
 
-func printBanner(pageSource, dataDir, port, hostURL string, trustLoopback bool) {
+func printBanner(pageSource, dataDir, port, base, hostURL string, trustLoopback bool) {
 	log.Println("局域网文件传输服务已启动")
 	log.Printf("  页面来源 %s", pageSource)
 	log.Printf("  数据目录 %s", dataDir)
+	log.Printf("  访问路径 %s", base)
 	if hostURL != "" {
 		log.Printf("  主机入口 %s", hostURL)
 		log.Printf("            ↑ 一次性链接：用过即失效；可在页面里生成新链接或邀请别人")
@@ -355,7 +359,7 @@ func (a *App) entry(next http.Handler) http.Handler {
 			if a.auth.RedeemHostKey(key) {
 				a.auth.GrantHost(w, r)
 				log.Printf("主机已通过一次性链接登录（%s）", clientIP(r))
-				redirectClean(w, r)
+				a.redirectClean(w, r)
 				return
 			}
 			log.Printf("主机链接无效或已被使用（%s）", clientIP(r))
@@ -372,7 +376,7 @@ func (a *App) entry(next http.Handler) http.Handler {
 			}
 			a.auth.GrantGuest(w, r, identity)
 			log.Printf("访客已通过邀请加入（邀请码 %s，来自 %s）", identity.InviteID, clientIP(r))
-			redirectClean(w, r)
+			a.redirectClean(w, r)
 			return
 		}
 
@@ -385,11 +389,54 @@ func (a *App) entry(next http.Handler) http.Handler {
 	})
 }
 
+// normalizeBase 把 -base 统一成「前后都有斜杠」的形式："" 和 "/" 都表示根路径。
+func normalizeBase(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "/" {
+		return "/"
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return strings.TrimRight(value, "/") + "/"
+}
+
+// withBase 支持把服务挂在子路径下（例如 nginx 的 location /lanfile/）。
+// 请求进来先剥掉前缀再交给后面的路由，所以内部仍然按 /、/api/... 、/ws 处理；
+// 前缀之外的路径直接 404，避免「/lanfilex」这种误匹配。
+func (a *App) withBase(next http.Handler) http.Handler {
+	if a.base == "/" {
+		return next
+	}
+
+	prefix := strings.TrimSuffix(a.base, "/") // /lanfile
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == prefix {
+			// 少了结尾斜杠：跳一下，否则页面里的相对路径（./app.js）会算错
+			http.Redirect(w, r, a.base, http.StatusMovedPermanently)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, a.base) {
+			http.NotFound(w, r)
+			return
+		}
+
+		r.URL.Path = "/" + strings.TrimPrefix(r.URL.Path, a.base)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// siteURL 是当前服务对外的根地址，例如 http://1.2.3.4:8080/lanfile（结尾不带斜杠）。
+func (a *App) siteURL(baseURL string) string {
+	return strings.TrimRight(baseURL, "/") + strings.TrimSuffix(a.base, "/")
+}
+
 // redirectClean 跳回不带查询参数的同一路径，避免密钥/邀请码留在地址栏与历史里。
-func redirectClean(w http.ResponseWriter, r *http.Request) {
-	target := r.URL.Path
+// 注意此时 r.URL.Path 已被 withBase 剥掉前缀，所以要自己把 base 拼回去。
+func (a *App) redirectClean(w http.ResponseWriter, r *http.Request) {
+	target := a.base + strings.TrimPrefix(r.URL.Path, "/")
 	if target == "" {
-		target = "/"
+		target = a.base
 	}
 	http.Redirect(w, r, target, http.StatusFound)
 }

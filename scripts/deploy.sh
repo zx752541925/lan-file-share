@@ -27,6 +27,7 @@ UNIT_LOCAL="deploy/lanfile.service"           # systemd 单元
 REMOTE_DIR="/opt/lanfile"                     # 二进制与旧版本备份
 REMOTE_DATA="/var/lib/lanfile"                # 会话数据、主机口令
 REMOTE_UNIT="/etc/systemd/system/lanfile.service"
+BASE_PATH="/lanfile/"                         # 服务对外路径前缀，需与 systemd 单元里的 -base 一致
 
 cd "$(dirname "$0")/.."                       # 无论从哪里调用，都先切回仓库根目录
 
@@ -65,7 +66,7 @@ systemctl restart lanfile
 sleep 1                                     # 稍等再探活
 echo "服务状态: \$(systemctl is-active lanfile)"
 echo "监听端口:"; ss -tlnp | grep 41730 || echo "  (没监听，检查日志)"
-echo "本机探活（403 = 服务正常，且已开启准入校验）:"; curl -sI 127.0.0.1:41730 | head -1
+echo "本机探活（403 = 服务正常，且已开启准入校验）:"; curl -sI "127.0.0.1:41730$BASE_PATH" | head -1
 REMOTE
 
 echo "==> 最近日志与主机入口"

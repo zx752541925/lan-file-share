@@ -51,10 +51,15 @@ const el = {
   toast: document.getElementById('toast'),
 };
 
+// 服务可能挂在子路径下（服务器版是 /lanfile/），所以所有请求都用「当前页面所在目录」拼出来，
+// 不写死以 / 开头的绝对路径。页面在 / 时 BASE 就是 /，本地版行为不变。
+const BASE = location.pathname.replace(/[^/]*$/, '');
+const api = (path) => BASE + path.replace(/^\//, '');
+
 const url = {
-  upload: '/api/upload',
-  file: (sessionId, fileId) => `/api/files/${sessionId}/${fileId}`,
-  download: (sessionId, fileId) => `/api/files/${sessionId}/${fileId}/download`,
+  upload: api('/api/upload'),
+  file: (sessionId, fileId) => `${api('/api/files')}/${sessionId}/${fileId}`,
+  download: (sessionId, fileId) => `${api('/api/files')}/${sessionId}/${fileId}/download`,
 };
 
 const isDesktop = () => window.matchMedia('(min-width: 900px)').matches;
@@ -221,7 +226,7 @@ function openFile(file) {
 // 主机专属：让服务端在资源管理器里定位到这个文件
 async function revealFile(file) {
   try {
-    const res = await fetch(`/api/reveal/${state.session.id}/${file.id}`);
+    const res = await fetch(api(`/api/reveal/${state.session.id}/${file.id}`));
     const data = await res.json().catch(() => null);
     showToast(res.ok ? '已在文件管理器中定位' : data?.error || '定位失败');
   } catch {
@@ -357,7 +362,7 @@ function setConnected(connected) {
 function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   // 身份走 cookie，浏览器会自动带上；不再往 URL 里塞任何凭据
-  socket = new WebSocket(`${scheme}://${location.host}/ws`);
+  socket = new WebSocket(`${scheme}://${location.host}${BASE}ws`);
 
   socket.addEventListener('open', () => {
     retryDelay = 1000;
@@ -690,10 +695,10 @@ function renderQrInvite(invite) {
 // 生成一张「扫码用」的邀请；旧的还没被扫就顺手撤销，避免堆一堆没人用的邀请
 async function newQrInvite() {
   if (qrInvite && qrInvite.status === '待使用') {
-    await apiJSON(`/api/invites/${qrInvite.id}`, { method: 'DELETE' }).catch(() => {});
+    await apiJSON(api(`/api/invites/${qrInvite.id}`), { method: 'DELETE' }).catch(() => {});
   }
 
-  const invite = await apiJSON('/api/invites', {
+  const invite = await apiJSON(api('/api/invites'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ note: '扫码加入' }),
@@ -704,7 +709,7 @@ async function newQrInvite() {
 async function refreshQrStatus() {
   if (!qrInvite || el.qrModal.hidden) return;
   try {
-    const data = await apiJSON('/api/invites');
+    const data = await apiJSON(api('/api/invites'));
     const current = (data.invites || []).find((item) => item.id === qrInvite.id);
     if (current) renderQrState(current);
   } catch {
@@ -918,7 +923,7 @@ function setHostLink(url) {
 
 async function loadHostLink() {
   try {
-    const data = await apiJSON('/api/host/link?read=1');
+    const data = await apiJSON(api('/api/host/link?read=1'));
     setHostLink(data.url);
   } catch (error) {
     showToast(error.message);
@@ -983,7 +988,7 @@ function renderDevices() {
 
 async function loadInvites() {
   try {
-    const data = await apiJSON('/api/invites');
+    const data = await apiJSON(api('/api/invites'));
     state.invites = data.invites || [];
     renderInvites();
   } catch (error) {
@@ -993,7 +998,7 @@ async function loadInvites() {
 
 async function loadDevices() {
   try {
-    const data = await apiJSON('/api/devices');
+    const data = await apiJSON(api('/api/devices'));
     state.devices = data.devices || [];
     renderDevices();
   } catch (error) {
@@ -1014,7 +1019,7 @@ el.hostLinkCopy.addEventListener('click', () => copyText(state.hostLink));
 
 el.hostLinkRotate.addEventListener('click', async () => {
   try {
-    const data = await apiJSON('/api/host/link');
+    const data = await apiJSON(api('/api/host/link'));
     setHostLink(data.url);
     showToast('已生成新链接，旧链接立即失效');
   } catch (error) {
@@ -1024,7 +1029,7 @@ el.hostLinkRotate.addEventListener('click', async () => {
 
 el.inviteCreate.addEventListener('click', async () => {
   try {
-    const invite = await apiJSON('/api/invites', {
+    const invite = await apiJSON(api('/api/invites'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note: el.inviteNote.value.trim() }),
@@ -1049,7 +1054,7 @@ el.inviteList.addEventListener('click', async (event) => {
   if (!window.confirm('撤销这张邀请？对方下一次操作就会被挡在门外。')) return;
 
   try {
-    await apiJSON(`/api/invites/${revoke.dataset.revoke}`, { method: 'DELETE' });
+    await apiJSON(api(`/api/invites/${revoke.dataset.revoke}`), { method: 'DELETE' });
     await loadInvites();
     await loadDevices();
     showToast('已撤销');
@@ -1153,7 +1158,7 @@ async function uploadInChunks(file, caption, item) {
   const saved = JSON.parse(localStorage.getItem(key) || 'null');
   if (saved?.uploadId) {
     try {
-      const res = await fetch(`/api/upload/status?uploadId=${encodeURIComponent(saved.uploadId)}`);
+      const res = await fetch(api(`/api/upload/status?uploadId=${encodeURIComponent(saved.uploadId)}`));
       if (res.ok) {
         uploadId = saved.uploadId;
         received = new Set((await res.json()).received || []);
@@ -1163,7 +1168,7 @@ async function uploadInChunks(file, caption, item) {
   }
 
   if (!uploadId) {
-    const res = await fetch('/api/upload/init', {
+    const res = await fetch(api('/api/upload/init'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: file.name, size: file.size }),
@@ -1207,7 +1212,7 @@ async function uploadInChunks(file, caption, item) {
   renderUploads();
 
   try {
-    const res = await fetch('/api/upload/complete', {
+    const res = await fetch(api('/api/upload/complete'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uploadId, text: caption, name: state.name || '', clientId: state.clientId }),
@@ -1235,7 +1240,7 @@ async function uploadInChunks(file, caption, item) {
 function putChunk(uploadId, index, blob, onProgress, attempt = 1) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', `/api/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}`);
+    xhr.open('PUT', api(`/api/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}`));
     xhr.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) onProgress(event.loaded);
     });

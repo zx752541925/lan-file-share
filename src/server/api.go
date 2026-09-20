@@ -374,7 +374,7 @@ func (a *App) handleHostLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	base := strings.TrimRight(a.baseURLFor(r), "/")
+	base := a.siteURL(a.baseURLFor(r))
 
 	// ?read=1 只读当前链接（可能已经被用过，此时返回空串），不生成新的
 	if r.URL.Query().Has("read") {
@@ -405,7 +405,7 @@ func (a *App) handleInvites(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		list := a.auth.ListInvites()
-		base := a.baseURLFor(r)
+		base := a.siteURL(a.baseURLFor(r))
 		out := make([]map[string]any, 0, len(list))
 		for _, invite := range list {
 			out = append(out, inviteView(invite, base))
@@ -420,7 +420,7 @@ func (a *App) handleInvites(w http.ResponseWriter, r *http.Request) {
 
 		invite := a.auth.CreateInvite(body.Note)
 		log.Printf("主机生成邀请链接「%s」", invite.Note)
-		writeJSON(w, http.StatusOK, inviteView(invite, a.baseURLFor(r)))
+		writeJSON(w, http.StatusOK, inviteView(invite, a.siteURL(a.baseURLFor(r))))
 
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)

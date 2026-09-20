@@ -186,12 +186,28 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `-public-url` | 空 | 生成主机/邀请链接用的对外地址，例如 `http://1.2.3.4:8080`；留空则按请求推导 |
+| `-base` | `/` | 访问子路径，例如 `/lanfile/`；用于 nginx 按路径分发多个服务，链接与跳转都会自动带上它 |
 | `-trust-loopback` | `true` | 直连且来源是回环地址时直接视为主机（本地开发用）。**经 nginx 等反向代理时必须设为 `false`**，否则所有访客都会被当成主机 |
 | `-host-cookie-days` | `30` | 主机 cookie 有效期（天），每次上线滑动续期 |
 | `-guest-cookie-days` | `7` | 访客 cookie 有效期（天），每次上线滑动续期 |
 | `-invite-ttl-hours` | `24` | 邀请链接未被使用时的有效期（小时） |
 
 ## 身份与准入（服务器版）
+
+### 按路径分发多个服务
+
+服务器上用 nginx 把不同服务分到不同路径前缀，只对外开一个端口（当前是 8080）：
+
+```
+http://<公网IP>:8080/          → 302 跳到 /lanfile/
+http://<公网IP>:8080/lanfile/  → lanfile（后端带 -base /lanfile/ 启动）
+http://<公网IP>:8080/<其他>/   → 以后新增的服务
+```
+
+配置见 [deploy/nginx/lanfile.conf](deploy/nginx/lanfile.conf)：`location /lanfile/` 原样透传，
+后端用 `-base` 自己剥前缀，两边不重复改写路径；`location /` 直接 404，避免未定义的服务被误转发。
+前端所有请求都由 `location.pathname` 推导出前缀（`const BASE = location.pathname.replace(/[^/]*$/, '')`），
+所以同一份前端在根路径（本地版）和子路径（服务器版）下都能用。
 
 两种角色，两种凭证：
 

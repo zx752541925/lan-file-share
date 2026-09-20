@@ -58,8 +58,12 @@ firewall-cmd --reload >/dev/null
 echo "已放行端口: $(firewall-cmd --list-ports) / 服务: $(firewall-cmd --list-services)"
 REMOTE
 
-echo "==> 本机验证（403 = 正常：入口通了，且准入拦截生效）"
-ssh "$DEPLOY_HOST" "curl -sI 127.0.0.1:8080 | head -1"
+echo "==> 本机验证"
+ssh "$DEPLOY_HOST" "bash -s" <<'REMOTE'
+echo -n "根路径（应 302 跳 /lanfile/）: "; curl -sI 127.0.0.1:8080/ | head -1
+echo -n "服务路径（应 403，准入拦截）  : "; curl -sI 127.0.0.1:8080/lanfile/ | head -1
+echo -n "未定义路径（应 404）          : "; curl -sI 127.0.0.1:8080/whatever | head -1
+REMOTE
 
 echo
-echo "下一步：到阿里云控制台放行入方向 TCP 8080，然后用主机链接访问 http://<公网IP>:8080/?host=<密钥>"
+echo "下一步：到阿里云控制台放行入方向 TCP 8080，然后用主机链接访问 http://<公网IP>:8080/lanfile/?host=<密钥>"
