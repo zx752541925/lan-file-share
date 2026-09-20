@@ -118,14 +118,18 @@
       </div>
       <div class="qr-box" id="qrBox"></div>
       <p class="qr-url" id="qrUrl"></p>
-      <div class="qr-alts" id="qrAlts"></div>
+      <p class="qr-state" id="qrState"></p>
+      <div class="qr-actions">
+        <button type="button" class="btn-primary" id="qrRotate">换一张</button>
+        <button type="button" class="btn-ghost" id="qrCopy">复制链接</button>
+      </div>
       <details class="qr-help">
-        <summary>扫了连不上？</summary>
+        <summary>扫了进不去？</summary>
         <ol>
-          <li>确认手机和电脑连的是同一个 Wi-Fi，别用流量或访客网络</li>
-          <li>用手机系统浏览器打开，别用微信 / QQ 内置浏览器</li>
-          <li>关掉手机的 VPN、加速器、私人 DNS 再试</li>
-          <li>第一次运行若防火墙提示被点掉，"允许应用通过防火墙"里放行 lanfile-server.exe</li>
+          <li>二维码就是一张一次性邀请：谁先扫谁加入，扫过即失效，再邀别人点「换一张」</li>
+          <li>下面显示「已有人扫码加入」就说明成功了</li>
+          <li>用手机系统浏览器扫，微信 / QQ 内置浏览器可能拦截</li>
+          <li>扫开白屏或提示需要邀请：确认手机能访问公网地址（别开 VPN / 私人 DNS）</li>
         </ol>
       </details>
     </div>

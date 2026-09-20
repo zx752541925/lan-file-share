@@ -27,7 +27,9 @@ const el = {
   qrModal: document.getElementById('qrModal'),
   qrBox: document.getElementById('qrBox'),
   qrUrl: document.getElementById('qrUrl'),
-  qrAlts: document.getElementById('qrAlts'),
+  qrState: document.getElementById('qrState'),
+  qrRotate: document.getElementById('qrRotate'),
+  qrCopy: document.getElementById('qrCopy'),
   sessionModal: document.getElementById('sessionModal'),
   sessionList: document.getElementById('sessionList'),
   linkBtn: document.getElementById('linkBtn'),
@@ -86,7 +88,6 @@ const state = {
   sessions: [],
   files: [],
   lan: [],
-  qrUrl: '',
   messages: [],
   uploads: [],
   hostLink: '',
@@ -381,7 +382,6 @@ function connect() {
         state.messages = data.history || [];
         state.files = data.files || [];
         state.lan = data.lan || [];
-        state.qrUrl = '';
         if (!state.name && data.name) adoptName(data.name);
         renderAll();
         break;
@@ -460,6 +460,7 @@ function renderSession() {
   el.sessionName.textContent = state.session ? formatSession(state.session.id) : '—';
   el.historyBtn.hidden = !state.host; // 只有主机能切换历史会话
   el.linkBtn.hidden = !state.host; // 只有主机能看主机链接与邀请管理
+  el.qrBtn.hidden = !state.host; // 二维码 = 一次性邀请，只有主机能发
 }
 
 function thumbHtml(file) {
@@ -642,38 +643,85 @@ function renderSessions() {
     .join('');
 }
 
-function renderQr() {
-  const list = state.lan.length
-    ? state.lan
-    : [{ name: '本机', ip: location.hostname, url: location.origin, virtual: false }];
+/* 扫码加入：二维码内容是一张一次性邀请链接，谁先扫谁绑定，扫过即失效 */
 
-  const usable = list.filter((item) => !item.virtual);
-  const targets = usable.length ? usable : list;
-  if (!state.qrUrl || !list.some((item) => item.url === state.qrUrl)) {
-    state.qrUrl = targets[0].url;
+let qrInvite = null; // 当前二维码对应的邀请
+let qrTimer = null; // 轮询邀请状态，扫码成功后页面立刻能看出来
+
+function stopQrPolling() {
+  if (qrTimer) {
+    clearInterval(qrTimer);
+    qrTimer = null;
+  }
+}
+
+function renderQrState(invite) {
+  if (!invite) {
+    el.qrState.textContent = '';
+    el.qrState.className = 'qr-state';
+    return;
   }
 
+  if (invite.status === '待使用') {
+    el.qrState.textContent = '等待扫码加入…（扫过即失效）';
+    el.qrState.className = 'qr-state pending';
+    return;
+  }
+
+  if (invite.status === '已使用') {
+    el.qrState.textContent = `已有人扫码加入${invite.note ? `（${invite.note}）` : ''}，再邀别人请点「换一张」`;
+    el.qrState.className = 'qr-state used';
+    return;
+  }
+
+  el.qrState.textContent = invite.status;
+  el.qrState.className = 'qr-state';
+}
+
+function renderQrInvite(invite) {
+  qrInvite = invite;
+  const link = invite?.url || '';
+  el.qrBox.innerHTML = link ? qrSvg(link) : '<p class="empty-tip">正在生成…</p>';
+  el.qrUrl.textContent = link;
+  el.qrCopy.disabled = !link;
+  renderQrState(invite);
+}
+
+// 生成一张「扫码用」的邀请；旧的还没被扫就顺手撤销，避免堆一堆没人用的邀请
+async function newQrInvite() {
+  if (qrInvite && qrInvite.status === '待使用') {
+    await apiJSON(`/api/invites/${qrInvite.id}`, { method: 'DELETE' }).catch(() => {});
+  }
+
+  const invite = await apiJSON('/api/invites', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: '扫码加入' }),
+  });
+  renderQrInvite(invite);
+}
+
+async function refreshQrStatus() {
+  if (!qrInvite || el.qrModal.hidden) return;
   try {
-    const qr = qrcode(0, 'M');
-    qr.addData(state.qrUrl);
-    qr.make();
-    el.qrBox.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 1, scalable: true });
+    const data = await apiJSON('/api/invites');
+    const current = (data.invites || []).find((item) => item.id === qrInvite.id);
+    if (current) renderQrState(current);
   } catch {
-    el.qrBox.innerHTML = '<p>二维码生成失败</p>';
+    // 网络抖动就下次再查
   }
+}
 
-  el.qrUrl.textContent = state.qrUrl;
-  el.qrAlts.innerHTML =
-    list.length > 1
-      ? list
-          .map(
-            (item) => `<button type="button" class="qr-alt ${item.url === state.qrUrl ? 'active' : ''}" data-url="${esc(item.url)}">
-                <span class="qr-alt-name">${esc(item.name)}${item.virtual ? ' · 手机不可用' : ''}</span>
-                <span>${esc(item.ip)}</span>
-              </button>`
-          )
-          .join('')
-      : '';
+async function openQrModal() {
+  openModal(el.qrModal);
+  renderQrInvite(null);
+  try {
+    await newQrInvite();
+  } catch (error) {
+    showToast(error.message);
+  }
+  stopQrPolling();
+  qrTimer = setInterval(refreshQrStatus, 3000);
 }
 
 function renderAll() {
@@ -695,6 +743,7 @@ function closeModals() {
   el.qrModal.hidden = true;
   el.sessionModal.hidden = true;
   el.linkModal.hidden = true;
+  stopQrPolling();
   hideConfirm();
 }
 
@@ -710,17 +759,25 @@ function hideConfirm() {
   el.confirmModal.classList.remove('stacked');
 }
 
-el.qrBtn.addEventListener('click', () => {
-  renderQr();
-  openModal(el.qrModal);
+el.qrBtn.addEventListener('click', openQrModal);
+
+el.qrRotate.addEventListener('click', async () => {
+  try {
+    await newQrInvite();
+    showToast('已换一张，新二维码可用');
+  } catch (error) {
+    showToast(error.message);
+  }
 });
+
+el.qrCopy.addEventListener('click', () => copyText(qrInvite?.url || ''));
 
 el.historyBtn.addEventListener('click', () => {
   openModal(el.sessionModal);
   send({ type: 'sessions' });
 });
 
-for (const modal of [el.qrModal, el.sessionModal]) {
+for (const modal of [el.qrModal, el.sessionModal, el.linkModal]) {
   modal.addEventListener('click', (event) => {
     if (event.target === modal || event.target.hasAttribute('data-close')) closeModals();
   });
@@ -728,13 +785,6 @@ for (const modal of [el.qrModal, el.sessionModal]) {
 
 el.confirmModal.addEventListener('click', (event) => {
   if (event.target === el.confirmModal || event.target.hasAttribute('data-close')) hideConfirm();
-});
-
-el.qrAlts.addEventListener('click', (event) => {
-  const button = event.target.closest('.qr-alt');
-  if (!button) return;
-  state.qrUrl = button.dataset.url;
-  renderQr();
 });
 
 el.sessionList.addEventListener('click', (event) => {
