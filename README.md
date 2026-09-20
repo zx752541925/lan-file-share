@@ -8,7 +8,7 @@ PC 与手机浏览器打开同一地址，即可聊天、互传文件。服务�
 
 | 形态 | 位置 | 形态与行为 | 状态 |
 | --- | --- | --- | --- |
-| 本地版 | tag [`v1.0-local`](../../releases) | Windows 单文件 exe（`make build-windows`），局域网直连、无鉴权、**每次启动 = 一个新会话** | **已归档**，除修 bug 外不再演进 |
+| 本地版 | tag `v1.0-local` | Windows 单文件 exe（`make build-windows`），局域网直连、无鉴权、**每次启动 = 一个新会话** | **已归档**，除修 bug 外不再演进 |
 | 服务器版 | `main` 分支 | Linux 静态二进制 + systemd 常驻（`make build-linux` + `scripts/deploy.sh`），只监听回环、经 nginx 入口访问 | 开发中，后续加入「仅主机邀请的人可进」 |
 
 ### 从归档点继续开发本地版
