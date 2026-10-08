@@ -72,13 +72,21 @@ GUI="$(wslpath -w ~/.codex/win-gui-tools)"      # 公共 GUI 工具包
 
 **这些工具的用法细节看 `~/.codex/win-gui-tools/README.md`。**
 
-两条重要提醒：
+三条重要提醒（都是实测踩出来的）：
 
 - **你（模型）看不了图片**：`view_image` 之类不可用。要"看"界面就用
   `find-text.ps1 -All`（把整屏 OCR 成文字）或 `find-text.ps1 -Text "关键词"`。
 - **目标窗口被别的窗口挡住时**，OCR 读到的会是压在上面的那个窗口。先置前：
   `click-text.ps1 -Text "..." -Activate <窗口名>`，或先把遮挡的窗口最小化。
   工具找不到文字时会自动把"当前屏幕识别到的文字"列出来，据此判断是谁在最前面。
+  置前结果工具会**如实报告**（校验过前后台窗口），报告失败就别硬点。
+- **点不动 ≠ 坐标错，先查权限**：如果坐标确认没错（`dump-controls` 或 OCR 给的），
+  但点击毫无反应，多半是对方**以管理员运行**，普通进程的鼠标注入被 Windows 拦掉（UIPI）。
+  `dump-controls.ps1` 现在会打印目标进程权限；是"管理员"就改用：
+  ```bash
+  "$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\click-elevated.ps1" -Text "登录" -Activate WeGame
+  ```
+  它会用提权子进程去点（本机 UAC 策略是"不提示直接提升"，不会弹窗）。
 
 ## 2.1 其他常用内置能力（先按第 1 节查，再用）
 
