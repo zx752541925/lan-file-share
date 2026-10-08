@@ -6,10 +6,24 @@ PC 与手机浏览器打开同一地址，即可聊天、互传文件。服务�
 
 同一个仓库里有两种形态，**代码同源**，差异只在「访问准入」和「会话语义」，不是两套代码：
 
+仓库目录按版本分区（公共逻辑两个版本共用，不做拆分）：
+
+```
+src/server/            公共后端（session/hub/api/upload/auth…）
+├── local_agent.go       本地版：聊天室 Codex 主体
+├── local_agent_api.go   本地版：控制台的两个接口
+└── local_setup.go       本地版：-agent* 参数、接线、/agent 路由
+src/web/               公共前端（index/app/styles/vendor）
+└── local/agent.html     本地版：Codex 控制台页面
+deploy/local/          本地版资产：Windows 启动器源码、portproxy.ps1、用户级 systemd 单元
+deploy/server/         服务器版资产：systemd 单元、nginx 配置
+docs/local.md          本地版说明        docs/server.md  服务器版配置清单
+```
+
 | 形态 | 位置 | 形态与行为 | 状态 |
 | --- | --- | --- | --- |
 | 本地版 | tag `v1.0-local` | Windows 单文件 exe（`make build-windows`），局域网直连、无鉴权、**每次启动 = 一个新会话** | **已归档**，除修 bug 外不再演进 |
-| 服务器版 | `main` 分支 | Linux 静态二进制 + systemd 常驻（`make build-linux` + `scripts/deploy.sh`），只监听回环、经 nginx 入口访问；主机用一次性链接换 cookie，访客必须由主机邀请 | 开发中 |
+| 服务器版 | `main` 分支 | Linux 静态二进制 + systemd 常驻（`make build-linux` + `scripts/deploy-server.sh`），只监听回环、经 nginx 入口访问；主机用一次性链接换 cookie，访客必须由主机邀请 | 开发中 |
 
 ### 从归档点继续开发本地版
 
@@ -25,10 +39,10 @@ make build-windows                   # 重新产出 dist/lanfile-server.exe
 
 ```bash
 make build-linux     # 静态编译（不依赖 glibc），产物 bin/lanfile-server-linux
-scripts/deploy.sh    # 上传 → 安装 systemd 单元 → 重启 → 回显状态与日志
+scripts/deploy-server.sh   # 上传 → 安装 systemd 单元 → 重启 → 回显状态与日志
 ```
 
-服务器上以专用用户 `lanfile` 运行，只监听 `127.0.0.1:41730`，数据在 `/var/lib/lanfile`（与二进制分离，重装不丢会话）。细节见 [deploy/lanfile.service](deploy/lanfile.service) 与 [scripts/deploy.sh](scripts/deploy.sh)。
+服务器上以专用用户 `lanfile` 运行，只监听 `127.0.0.1:41730`，数据在 `/var/lib/lanfile`（与二进制分离，重装不丢会话）。细节见 [deploy/server/lanfile.service](deploy/server/lanfile.service) 与 [scripts/deploy-server.sh](scripts/deploy-server.sh)；本地版的说明见 [docs/local.md](docs/local.md)。
 
 ## 主要文件
 
@@ -59,7 +73,7 @@ scripts/deploy.sh    # 上传 → 安装 systemd 单元 → 重启 → 回显状
 | 文件 | 作用 |
 | --- | --- |
 | [Makefile](Makefile) | 构建入口：`make run` / `make build` / `make build-windows` |
-| [scripts/windows/portproxy.ps1](scripts/windows/portproxy.ps1) | Windows 10 下把端口映射进 WSL（用 exe 时不需要）|
+| [deploy/local/portproxy.ps1](deploy/local/portproxy.ps1) | Windows 10 下把端口映射进 WSL（用 exe 时不需要）|
 
 文档内快速跳转：[运行](#运行) · [Windows 单文件版](#windows-单文件版) · [接口](#接口) · [会话与主机](#会话与主机) · [文件存储](#文件存储) · [断点续传](#断点续传) · [手机打不开？](#手机打不开) · [环境变量](#环境变量) · [目录](#目录)
 
@@ -153,7 +167,7 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | `src/web/` | 前端静态资源：页面、样式、交互脚本、`vendor/qrcode.js` 二维码库 |
 | `src/server/` | Go 后端：入口 `main.go`、连接管理 `hub.go`、接口 `api.go`、会话与存储 `session.go` |
 | `data/sessions/<日期_时间>/` | 一个会话一个文件夹：`session.json` 存聊天与文件元数据，`uploads/` 存文件本体 |
-| `scripts/windows/portproxy.ps1` | Windows 10 下把端口映射进 WSL（用 exe 时不需要） |
+| `deploy/local/portproxy.ps1` | Windows 10 下把端口映射进 WSL（用 exe 时不需要） |
 | `webassets.go` | 把 `src/web` 编译进二进制，供单文件分发 |
 | `src/server/auth.go` | 权限判定（目前只有"主机"角色），上公网时在这里扩展登录态 |
 
@@ -249,7 +263,7 @@ http://<公网IP>:8080/lanfile/  → lanfile（后端带 -base /lanfile/ 启动�
 http://<公网IP>:8080/<其他>/   → 以后新增的服务
 ```
 
-配置见 [deploy/nginx/lanfile.conf](deploy/nginx/lanfile.conf)：`location /lanfile/` 原样透传，
+配置见 [deploy/server/nginx/lanfile.conf](deploy/server/nginx/lanfile.conf)：`location /lanfile/` 原样透传，
 后端用 `-base` 自己剥前缀，两边不重复改写路径；`location /` 直接 404，避免未定义的服务被误转发。
 前端所有请求都由 `location.pathname` 推导出前缀（`const BASE = location.pathname.replace(/[^/]*$/, '')`），
 所以同一份前端在根路径（本地版）和子路径（服务器版）下都能用。

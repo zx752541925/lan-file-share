@@ -51,14 +51,8 @@ func main() {
 	hostCookieDays := flag.Int("host-cookie-days", 30, "主机登录有效期（天，每次上线滑动续期）")
 	guestCookieDays := flag.Int("guest-cookie-days", 7, "访客登录有效期（天，每次上线滑动续期）")
 	inviteTTLHours := flag.Int("invite-ttl-hours", 24, "邀请链接未被使用时的有效期（小时）")
-	agentOn := flag.Bool("agent", false, "开启聊天室里的 Codex 成员（需要本机能调 codex CLI）")
-	agentTrigger := flag.String("agent-trigger", "@codex", "触发词，消息里出现它才回复（不分大小写）")
-	agentName := flag.String("agent-name", "Codex", "聊天里显示的昵称")
-	agentCwd := flag.String("agent-cwd", "sessions", "Codex 的工作目录；相对路径按数据目录解析（默认 data/sessions）")
-	agentHome := flag.String("agent-home", "", "给 Codex 用的独立 CODEX_HOME（自带免确认的 AGENTS.md）；留空则用 <数据目录>/agent-home")
-	agentBaseURL := flag.String("agent-base-url", "", "把 agent 的 provider base_url 改写成这个地址，例如 http://127.0.0.1:41780/（本地 shim，可显示思考过程）")
-	agentTimeout := flag.Int("agent-timeout", 300, "单次执行超时（秒）")
-	agentNotify := flag.Bool("agent-notify", true, "Codex 执行失败时在聊天里发一条提示")
+	// 本地版专属的参数（-agent*）在 local_setup.go 里注册
+	agentFlags := registerLocalAgentFlags()
 	openBrowser := flag.Bool("open", true, "启动后自动打开浏览器")
 	flag.Parse()
 
@@ -97,13 +91,7 @@ func main() {
 	}
 	go app.hub.Run()
 
-	if *agentOn {
-		app.agent = newAgent(*agentName, *agentTrigger, *agentCwd,
-			*agentHome, *agentBaseURL, time.Duration(*agentTimeout)*time.Second, *dataDir, *agentNotify)
-		app.agentTrigger = *agentTrigger
-		app.agentCwd = *agentCwd
-		app.agentTimeout = time.Duration(*agentTimeout) * time.Second
-	}
+	setupLocalAgent(app, agentFlags, *dataDir)
 
 	chunks := newChunkedUploads(filepath.Join(*dataDir, "tmp"), app)
 
@@ -126,7 +114,8 @@ func main() {
 	mux.HandleFunc("/api/devices", app.handleDevices)
 	mux.HandleFunc("/api/agent/tasks", app.handleAgentTasks)
 	mux.HandleFunc("/api/agent/tasks/", app.handleAgentTaskAction)
-	mux.HandleFunc("/agent", app.handleConsole(pages, version))
+	// 本地版专属：Codex 控制台页面（服务器版不会注册这条路由，见 local_setup.go）
+	registerLocalConsole(mux, app, pages, version)
 	mux.Handle("/", staticHandler(pages, version))
 
 	server := &http.Server{
@@ -280,7 +269,7 @@ func staticHandler(fsys fs.FS, version string) http.Handler {
 // assetsVersion 用前端文件内容算出版本号，内容不变则版本号不变。
 func assetsVersion(fsys fs.FS) string {
 	hash := fnv.New64a()
-	for _, name := range []string{"index.html", "styles.css", "app.js", "agent.html"} {
+	for _, name := range []string{"index.html", "styles.css", "app.js", "local/agent.html"} {
 		if raw, err := fs.ReadFile(fsys, name); err == nil {
 			_, _ = hash.Write(raw)
 		}
@@ -299,18 +288,6 @@ func pageHandler(fsys fs.FS, version, name string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(bytes.ReplaceAll(raw, []byte("__V__"), []byte(version)))
-	}
-}
-
-// handleConsole 提供 Codex 控制台页面：只有主机能打开，其他人直接送回聊天页。
-func (a *App) handleConsole(pages fs.FS, version string) http.HandlerFunc {
-	serve := pageHandler(pages, version, "agent.html")
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !a.auth.IdentityOf(nil, r).IsHost() {
-			http.Redirect(w, r, a.base, http.StatusFound)
-			return
-		}
-		serve(w, r)
 	}
 }
 

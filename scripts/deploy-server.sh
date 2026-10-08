@@ -15,14 +15,14 @@
 #   cd /opt/lanfile && cp -f lanfile-server.bak lanfile-server && systemctl restart lanfile
 #
 # 用法：
-#   scripts/deploy.sh                                   # 部署到 myecs
-#   LANFILE_DEPLOY_HOST=其他别名 scripts/deploy.sh        # 部署到别的主机
+#   scripts/deploy-server.sh                                   # 部署到 myecs
+#   LANFILE_DEPLOY_HOST=其他别名 scripts/deploy-server.sh        # 部署到别的主机
 #
 set -euo pipefail
 
 DEPLOY_HOST="${LANFILE_DEPLOY_HOST:-myecs}"   # 目标主机：ssh 别名或 IP
 BIN_LOCAL="bin/lanfile-server-linux"          # make build-linux 的产物
-UNIT_LOCAL="deploy/lanfile.service"           # systemd 单元
+UNIT_LOCAL="deploy/server/lanfile.service"           # systemd 单元
 
 REMOTE_DIR="/opt/lanfile"                     # 二进制与旧版本备份
 REMOTE_DATA="/var/lib/lanfile"                # 会话数据、主机口令

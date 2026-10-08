@@ -1,7 +1,7 @@
 # 局域网文件传输服务（lanfile）的 systemd 单元
 #
 # 部署位置：/etc/systemd/system/lanfile.service
-# 安装/更新：运行 scripts/deploy.sh 会自动上传并 daemon-reload
+# 安装/更新：运行 scripts/deploy-server.sh 会自动上传并 daemon-reload
 # 手动生效：systemctl daemon-reload && systemctl restart lanfile
 # 运行用户：专用系统用户 lanfile（无登录 shell），由 deploy.sh 创建
 # 二进制：  /opt/lanfile/lanfile-server（上一版保留为 lanfile-server.bak，回滚只需换回来并 restart）

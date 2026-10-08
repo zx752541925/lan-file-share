@@ -3,7 +3,7 @@
 # 部署 nginx 入口（只做一次，之后改配置再跑一次即可）
 #
 # 做什么：
-#   1. 上传 deploy/nginx/ 下的配置到服务器（snippets + conf.d）
+#   1. 上传 deploy/server/nginx/ 下的配置到服务器（snippets + conf.d）
 #   2. 关掉发行版自带的 80 端口默认站点（本机只对外开放 8080）
 #   3. nginx -t 校验 → 启用并重启 → firewalld 放行 8080
 #
@@ -20,9 +20,9 @@ cd "$(dirname "$0")/.."
 
 echo "==> 上传 nginx 配置"
 ssh "$DEPLOY_HOST" "mkdir -p /etc/nginx/snippets"
-scp -q deploy/nginx/proxy-common.conf "$DEPLOY_HOST:/etc/nginx/snippets/proxy-common.conf"
-scp -q deploy/nginx/00-common.conf "$DEPLOY_HOST:/etc/nginx/conf.d/00-common.conf"
-scp -q deploy/nginx/lanfile.conf "$DEPLOY_HOST:/etc/nginx/conf.d/lanfile.conf"
+scp -q deploy/server/nginx/proxy-common.conf "$DEPLOY_HOST:/etc/nginx/snippets/proxy-common.conf"
+scp -q deploy/server/nginx/00-common.conf "$DEPLOY_HOST:/etc/nginx/conf.d/00-common.conf"
+scp -q deploy/server/nginx/lanfile.conf "$DEPLOY_HOST:/etc/nginx/conf.d/lanfile.conf"
 
 echo "==> 关掉发行版自带的 80 端口默认站点（只保留 8080 入口）"
 ssh "$DEPLOY_HOST" "bash -s" <<'REMOTE'
