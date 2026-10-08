@@ -86,6 +86,7 @@ rm data/agent-home/AGENTS.md && systemctl --user restart lanfile
 | 层 | 内容 | 解决什么 |
 | --- | --- | --- |
 | **能力指南**（静态，人工维护） | `deploy/local/agent-tools/agent-manual.md`：先说清"你在 WSL，但默认操作 Windows"，再教**怎么查 Windows 有什么工具**（`Get-Command` / `where.exe` / `Get-Help` / 看 `System32`），最后给一张"常用内置能力表"（截屏、进程、启动程序、锁屏、剪贴板、文件操作） | 让它**自己会找工具**，而不是记住每一条具体命令 |
+| **步数上限**（硬闸） | `-agent-max-steps`（默认 12）：单个任务的命令 + 工具调用超过就终止，避免"反复试错烧到超时" |
 | **自动经验**（动态，程序沉淀） | `data/agent-home/experiences.json`：每次任务把「任务 + 当时成功的命令」记一条，相同命令组合只留一条（累加次数），最多 30 条；每次任务注入最近 10 条 | 这个项目里**已经跑通的做法**下次直接照做 |
 
 投入方式：**每次任务都注入**（能力指南约 250 token + 经验约 500 token，固定不涨）。

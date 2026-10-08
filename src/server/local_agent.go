@@ -81,6 +81,31 @@ type agentTask struct {
 	canceled bool // 排队中就被取消
 	// goodCommands 记录这次任务里成功执行的命令，用于沉淀经验
 	goodCommands []string
+	// 步数控制：命令与 MCP 调用都算一步，超过上限就终止任务（防止无限试错）
+	steps     int
+	stepLimit int
+	cancel    func()
+	overLimit bool
+}
+
+// countStep 记一步；超过上限就杀掉这条任务（按进程组），并标记原因。
+func (t *agentTask) countStep() {
+	t.mu.Lock()
+	if t.stepLimit <= 0 {
+		t.mu.Unlock()
+		return
+	}
+	t.steps++
+	over := t.steps > t.stepLimit
+	cancel := t.cancel
+	if over {
+		t.overLimit = true
+	}
+	t.mu.Unlock()
+
+	if over && cancel != nil {
+		cancel()
+	}
 }
 
 func (t *agentTask) add(kind, text string) {
@@ -106,14 +131,15 @@ func (t *agentTask) snapshot() AgentTask {
 
 // Agent 是聊天室里那个由 codex CLI 扮演的成员。
 type Agent struct {
-	name    string        // 显示昵称
-	trigger string        // 触发词
-	cwd     string        // 工作目录（codex -C）
-	timeout time.Duration // 单次执行超时
-	bin     string        // codex 可执行文件的绝对路径
-	notify  bool          // 失败时是否在聊天里发一条提示
-	home    string        // 独立的 CODEX_HOME：自带一份 config.toml 和 AGENTS.md
-	baseURL string        // 可选：把 provider 的 base_url 改写成它（例如指向本地 shim）
+	name     string        // 显示昵称
+	trigger  string        // 触发词
+	cwd      string        // 工作目录（codex -C）
+	timeout  time.Duration // 单次执行超时
+	bin      string        // codex 可执行文件的绝对路径
+	notify   bool          // 失败时是否在聊天里发一条提示
+	maxSteps int           // 单个任务最多几步（命令 + MCP 调用），<=0 表示不限制
+	home     string        // 独立的 CODEX_HOME：自带一份 config.toml 和 AGENTS.md
+	baseURL  string        // 可选：把 provider 的 base_url 改写成它（例如指向本地 shim）
 	// 经验库：记录"做过的任务 + 当时成功的命令"，下次同类任务直接照做
 	expPath string
 
@@ -136,7 +162,7 @@ type agentJob struct {
 
 // newAgent 准备 agent：解析 codex 路径、确定工作目录并启动串行执行协程。
 // 找不到 codex 时返回 nil（调用方据此关闭功能），不会让服务起不来。
-func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration, dataDir string, notify bool) *Agent {
+func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration, dataDir string, notify bool, maxSteps int) *Agent {
 	bin, err := exec.LookPath(agentCodexBinary)
 	if err != nil {
 		log.Printf("agent：找不到 codex 可执行文件（%v），聊天室 Codex 功能已关闭", err)
@@ -183,17 +209,18 @@ func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration
 	}
 
 	agent := &Agent{
-		name:    name,
-		trigger: strings.ToLower(strings.TrimSpace(trigger)),
-		cwd:     cwd,
-		timeout: timeout,
-		bin:     bin,
-		notify:  notify,
-		home:    homeDir,
-		baseURL: strings.TrimSpace(baseURL),
-		expPath: filepath.Join(homeDir, "experiences.json"),
-		jobs:    make(chan agentJob, agentQueueSize),
-		seen:    make(map[string]bool),
+		name:     name,
+		trigger:  strings.ToLower(strings.TrimSpace(trigger)),
+		cwd:      cwd,
+		timeout:  timeout,
+		bin:      bin,
+		notify:   notify,
+		maxSteps: maxSteps,
+		home:     homeDir,
+		baseURL:  strings.TrimSpace(baseURL),
+		expPath:  filepath.Join(homeDir, "experiences.json"),
+		jobs:     make(chan agentJob, agentQueueSize),
+		seen:     make(map[string]bool),
 	}
 	agent.syncConfig()
 	go agent.run()
@@ -286,6 +313,7 @@ func (a *Agent) Handle(app *App, sessionID string, message Message) {
 		Status:    "queued",
 		QueuedAt:  time.Now().UnixMilli(),
 	}}
+	task.stepLimit = a.maxSteps
 	a.pushTask(task)
 
 	select {
@@ -746,6 +774,9 @@ func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error
 
 	task.mu.Lock()
 	task.pgid = cmd.Process.Pid // Setpgid 之后，进程组 id 等于子进程 pid
+	task.cancel = func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	task.mu.Unlock()
 
 	// 边跑边读：每行都是一条 JSON 事件，解析后记进任务（控制台实时可见）
@@ -763,7 +794,13 @@ func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error
 	task.mu.Lock()
 	task.pgid = 0 // 清掉引用，避免后续误杀复用到的 pid
 	killed := task.Status == "killed"
+	overflow := task.overLimit
+	steps, limit := task.steps, task.stepLimit
 	task.mu.Unlock()
+	if overflow {
+		return "", usage, fmt.Errorf("超过步数上限（%d 步，含命令与工具调用），已停止；建议把情况说清楚让人来接手", limit)
+	}
+	_ = steps
 	if killed {
 		return "", usage, fmt.Errorf("已被主机终止")
 	}
@@ -824,6 +861,9 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 	case "item.started", "item.completed":
 		switch event.Item.Type {
 		case "command_execution":
+			if event.Type == "item.started" {
+				task.countStep()
+			}
 			if event.Type == "item.started" && event.Item.Command != "" {
 				task.add("command", "$ "+event.Item.Command)
 			}
@@ -848,6 +888,7 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 				label = "MCP 工具"
 			}
 			if event.Type == "item.started" {
+				task.countStep()
 				task.add("mcp", fmt.Sprintf("调用 %s %s", label, compactJSON(event.Item.Arguments, 160)))
 			} else {
 				if len(event.Item.Error) > 0 && string(event.Item.Error) != "null" {

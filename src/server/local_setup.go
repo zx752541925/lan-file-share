@@ -14,27 +14,29 @@ import (
 
 // localAgentFlags 汇总 -agent* 这一组参数，方便在 main 里一次性接线。
 type localAgentFlags struct {
-	on      *bool
-	trigger *string
-	name    *string
-	cwd     *string
-	home    *string
-	baseURL *string
-	timeout *int
-	notify  *bool
+	on       *bool
+	trigger  *string
+	name     *string
+	cwd      *string
+	home     *string
+	baseURL  *string
+	timeout  *int
+	notify   *bool
+	maxSteps *int
 }
 
 // registerLocalAgentFlags 注册本地版专属参数（必须在 flag.Parse() 之前调用）。
 func registerLocalAgentFlags() localAgentFlags {
 	return localAgentFlags{
-		on:      flag.Bool("agent", false, "开启聊天室里的 Codex 成员（需要本机能调 codex CLI）"),
-		trigger: flag.String("agent-trigger", "@codex", "触发词，消息里出现它才回复（不分大小写）"),
-		name:    flag.String("agent-name", "Codex", "聊天里显示的昵称"),
-		cwd:     flag.String("agent-cwd", "sessions", "Codex 的工作目录；相对路径按数据目录解析（默认 data/sessions）"),
-		home:    flag.String("agent-home", "", "给 Codex 用的独立 CODEX_HOME（自带免确认的 AGENTS.md）；留空则用 <数据目录>/agent-home"),
-		baseURL: flag.String("agent-base-url", "", "把 agent 的 provider base_url 改写成这个地址，例如 http://127.0.0.1:41780/（本地 shim，可显示思考过程）"),
-		timeout: flag.Int("agent-timeout", 300, "单次执行超时（秒）"),
-		notify:  flag.Bool("agent-notify", true, "Codex 执行失败时在聊天里发一条提示"),
+		on:       flag.Bool("agent", false, "开启聊天室里的 Codex 成员（需要本机能调 codex CLI）"),
+		trigger:  flag.String("agent-trigger", "@codex", "触发词，消息里出现它才回复（不分大小写）"),
+		name:     flag.String("agent-name", "Codex", "聊天里显示的昵称"),
+		cwd:      flag.String("agent-cwd", "sessions", "Codex 的工作目录；相对路径按数据目录解析（默认 data/sessions）"),
+		home:     flag.String("agent-home", "", "给 Codex 用的独立 CODEX_HOME（自带免确认的 AGENTS.md）；留空则用 <数据目录>/agent-home"),
+		baseURL:  flag.String("agent-base-url", "", "把 agent 的 provider base_url 改写成这个地址，例如 http://127.0.0.1:41780/（本地 shim，可显示思考过程）"),
+		timeout:  flag.Int("agent-timeout", 300, "单次执行超时（秒）"),
+		notify:   flag.Bool("agent-notify", true, "Codex 执行失败时在聊天里发一条提示"),
+		maxSteps: flag.Int("agent-max-steps", 12, "单个任务最多几步（命令 + 工具调用），超限终止；0 = 不限制"),
 	}
 }
 
@@ -46,7 +48,7 @@ func setupLocalAgent(app *App, flags localAgentFlags, dataDir string) {
 
 	timeout := time.Duration(*flags.timeout) * time.Second
 	app.agent = newAgent(*flags.name, *flags.trigger, *flags.cwd,
-		*flags.home, *flags.baseURL, timeout, dataDir, *flags.notify)
+		*flags.home, *flags.baseURL, timeout, dataDir, *flags.notify, *flags.maxSteps)
 	app.agentTrigger = *flags.trigger
 	app.agentCwd = *flags.cwd
 	app.agentTimeout = timeout

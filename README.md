@@ -217,6 +217,7 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | `-agent-home` | 空 | 给 Codex 用的独立 `CODEX_HOME`（自带免确认的 `AGENTS.md`），默认 `<数据目录>/agent-home` |
 | `-agent-base-url` | 空 | 把 agent 的 provider `base_url` 改写成这个地址（例如 `http://127.0.0.1:41780/`，配合本地 `deepseek-shim` 就能在控制台看到「思考」行） |
 | `-agent-timeout` | `300` | 单次执行超时（秒），超时按进程组整棵杀掉 |
+| `-agent-max-steps` | `12` | 单个任务最多几步（命令 + 工具调用都算），超限终止并说明卡在哪；`0` = 不限制 |
 | `-agent-notify` | `true` | 执行失败时在聊天里发一条提示（否则只记日志） |
 
 ## 身份与准入（服务器版）
