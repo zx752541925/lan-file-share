@@ -614,6 +614,27 @@ body.files-open .panel-files { transform: none; }
   background: var(--panel);
 }
 
+/* 输入框上方的快捷按钮（目前只有 @Codex 一个） */
+.composer-quick {
+  display: flex;
+  gap: 6px;
+  margin: 0 4px 6px;
+}
+
+.quick-chip {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.quick-chip:hover { border-color: var(--accent); }
+.quick-chip:active { opacity: 0.8; }
+
 .composer-box {
   display: flex;
   align-items: flex-end;

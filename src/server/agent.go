@@ -13,7 +13,9 @@ package main
 // （例如 data/secret.key），所以「谁能触发」是唯一有效的防线。
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -26,12 +28,74 @@ import (
 )
 
 const (
-	agentQueueSize    = 3                // 排队上限，满了直接丢弃
-	agentHistoryLimit = 20               // 拼进 prompt 的最近消息数
-	agentReplyLimit   = 4000             // 回复最大字符数，超出截断
-	agentSeenLimit    = 200              // 去重表保留的消息 ID 数
-	agentCodexBinary  = "codex"          // 默认从 PATH 里找
+	agentQueueSize    = 3       // 排队上限，满了直接丢弃
+	agentHistoryLimit = 20      // 拼进 prompt 的最近消息数
+	agentReplyLimit   = 4000    // 回复最大字符数，超出截断
+	agentSeenLimit    = 200     // 去重表保留的消息 ID 数
+	agentCodexBinary  = "codex" // 默认从 PATH 里找
+	agentTaskKeep     = 30      // 控制台保留的最近任务数
+	agentLineKeep     = 500     // 每个任务保留的输出行数
 )
+
+// AgentLine 是控制台里的一行输出。
+type AgentLine struct {
+	Kind string `json:"kind"` // command / output / message / error / raw / note
+	Text string `json:"text"`
+	TS   int64  `json:"ts"`
+}
+
+// AgentUsage 是 codex 报的 token 用量。
+type AgentUsage struct {
+	InputTokens       int64 `json:"inputTokens"`
+	CachedInputTokens int64 `json:"cachedInputTokens"`
+	OutputTokens      int64 `json:"outputTokens"`
+	ReasoningTokens   int64 `json:"reasoningTokens"`
+}
+
+// AgentTask 是一次 @Codex 触发的执行，控制台据此展示与终止。
+type AgentTask struct {
+	ID         string      `json:"id"`
+	SessionID  string      `json:"sessionId"`
+	From       string      `json:"from"`
+	Prompt     string      `json:"prompt"`
+	Status     string      `json:"status"` // queued / running / done / failed / killed / canceled
+	QueuedAt   int64       `json:"queuedAt"`
+	StartedAt  int64       `json:"startedAt,omitempty"`
+	FinishedAt int64       `json:"finishedAt,omitempty"`
+	Lines      []AgentLine `json:"lines"`
+	Usage      *AgentUsage `json:"usage,omitempty"`
+	Error      string      `json:"error,omitempty"`
+}
+
+// agentTask 是 AgentTask 的运行时包装：带着锁、进程组和取消标记。
+// （AgentTask 本身保持"纯数据"，这样快照可以安全地按值复制给控制台。）
+type agentTask struct {
+	AgentTask
+	mu       sync.Mutex
+	pgid     int  // 进程组 id，用于终止（连同子进程一起杀）
+	canceled bool // 排队中就被取消
+}
+
+func (t *agentTask) add(kind, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Lines = append(t.Lines, AgentLine{Kind: kind, Text: text, TS: time.Now().UnixMilli()})
+	if len(t.Lines) > agentLineKeep {
+		t.Lines = t.Lines[len(t.Lines)-agentLineKeep:]
+	}
+}
+
+func (t *agentTask) snapshot() AgentTask {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := t.AgentTask
+	out.Lines = append([]AgentLine(nil), t.Lines...)
+	return out
+}
 
 // Agent 是聊天室里那个由 codex CLI 扮演的成员。
 type Agent struct {
@@ -48,12 +112,16 @@ type Agent struct {
 	mu   sync.Mutex
 	seen map[string]bool // 已处理过的消息 ID（去重，避免同一消息跑两次）
 	seq  []string        // seen 的淘汰顺序
+
+	taskMu sync.Mutex
+	tasks  []*agentTask // 最近的在前
 }
 
 type agentJob struct {
 	app       *App
 	sessionID string
 	message   Message
+	task      *agentTask
 }
 
 // agentHomeAGENTS 是这个成员自己的行为规范。必须用独立 CODEX_HOME 的原因：
@@ -174,10 +242,94 @@ func (a *Agent) Handle(app *App, sessionID string, message Message) {
 		return
 	}
 
+	task := &agentTask{AgentTask: AgentTask{
+		ID:        newID(),
+		SessionID: sessionID,
+		From:      message.Name,
+		Prompt:    truncate(strings.TrimSpace(message.Text), 120),
+		Status:    "queued",
+		QueuedAt:  time.Now().UnixMilli(),
+	}}
+	a.pushTask(task)
+
 	select {
-	case a.jobs <- agentJob{app: app, sessionID: sessionID, message: message}:
+	case a.jobs <- agentJob{app: app, sessionID: sessionID, message: message, task: task}:
 	default:
+		task.Status = "failed"
+		task.Error = "队列已满，任务被丢弃"
+		task.add("error", task.Error)
+		task.FinishedAt = time.Now().UnixMilli()
 		log.Printf("agent：队列已满，丢弃消息 %s", message.ID)
+	}
+}
+
+func (a *Agent) pushTask(task *agentTask) {
+	a.taskMu.Lock()
+	defer a.taskMu.Unlock()
+	a.tasks = append([]*agentTask{task}, a.tasks...)
+	if len(a.tasks) > agentTaskKeep {
+		a.tasks = a.tasks[:agentTaskKeep]
+	}
+}
+
+// Tasks 返回任务快照（最近的在前），供控制台展示。
+func (a *Agent) Tasks() []AgentTask {
+	if a == nil {
+		return nil
+	}
+	a.taskMu.Lock()
+	list := append([]*agentTask(nil), a.tasks...)
+	a.taskMu.Unlock()
+
+	out := make([]AgentTask, 0, len(list))
+	for _, task := range list {
+		out = append(out, task.snapshot())
+	}
+	return out
+}
+
+// Kill 终止一个任务：排队中的直接取消，运行中的按进程组杀。
+func (a *Agent) Kill(id string) bool {
+	if a == nil {
+		return false
+	}
+	a.taskMu.Lock()
+	var target *agentTask
+	for _, task := range a.tasks {
+		if task.ID == id {
+			target = task
+			break
+		}
+	}
+	a.taskMu.Unlock()
+	if target == nil {
+		return false
+	}
+
+	target.mu.Lock()
+	defer target.mu.Unlock()
+
+	switch target.Status {
+	case "queued":
+		target.canceled = true
+		target.Status = "canceled"
+		target.FinishedAt = time.Now().UnixMilli()
+		target.Lines = append(target.Lines, AgentLine{Kind: "error", Text: "排队中被主机取消", TS: time.Now().UnixMilli()})
+		return true
+	case "running":
+		if target.pgid > 0 {
+			// 负号 = 整个进程组，连它拉起的子进程一起杀
+			if err := syscall.Kill(-target.pgid, syscall.SIGKILL); err != nil {
+				log.Printf("agent：终止任务 %s 失败：%v", id, err)
+				return false
+			}
+		}
+		target.Status = "killed"
+		target.FinishedAt = time.Now().UnixMilli()
+		target.Lines = append(target.Lines, AgentLine{Kind: "error", Text: "已被主机终止", TS: time.Now().UnixMilli()})
+		return true
+	default:
+		return false
 	}
 }
 
@@ -208,9 +360,21 @@ func (a *Agent) run() {
 func (a *Agent) process(job agentJob) {
 	a.syncConfig() // 配置可能被改过，跑之前对一次
 
+	task := job.task
+	task.mu.Lock()
+	if task.canceled {
+		task.mu.Unlock()
+		log.Printf("agent：任务 %s 已在排队时取消，跳过", task.ID)
+		return
+	}
+	task.Status = "running"
+	task.StartedAt = time.Now().UnixMilli()
+	task.mu.Unlock()
+
 	session, ok := job.app.sessions.ByID(job.sessionID)
 	if !ok {
 		log.Printf("agent：会话 %s 已不存在，跳过", job.sessionID)
+		task.finish("failed", "会话已不存在", nil)
 		return
 	}
 	history := job.app.sessions.Messages(session)
@@ -218,11 +382,13 @@ func (a *Agent) process(job agentJob) {
 
 	started := time.Now()
 	log.Printf("agent：开始处理消息 %s（会话 %s，历史 %d 条）", job.message.ID, job.sessionID, len(history))
+	task.add("note", fmt.Sprintf("开始处理：%s", task.Prompt))
 
-	reply, err := a.exec(prompt)
+	reply, usage, err := a.exec(task, prompt)
 	elapsed := time.Since(started).Round(time.Millisecond)
 	if err != nil {
 		log.Printf("agent：执行失败（耗时 %s）：%v", elapsed, err)
+		task.finish("failed", err.Error(), usage)
 		if a.notify {
 			a.reply(job, fmt.Sprintf("（Codex 执行失败：%v）", err))
 		}
@@ -232,7 +398,39 @@ func (a *Agent) process(job agentJob) {
 		reply = "（Codex 没有返回内容）"
 	}
 	log.Printf("agent：处理完成（耗时 %s，回复 %d 字）", elapsed, len([]rune(reply)))
+	task.finish("done", "", usage)
+	// 事件流里通常已经带了最终回复，避免重复记一条
+	task.mu.Lock()
+	hasReply := false
+	for _, line := range task.Lines {
+		if line.Kind == "message" {
+			hasReply = true
+			break
+		}
+	}
+	task.mu.Unlock()
+	if !hasReply {
+		task.add("message", reply)
+	}
 	a.reply(job, reply)
+}
+
+// finish 落地任务终态（running→done/failed/killed 之外的状态由 Kill 自己写）。
+func (t *agentTask) finish(status, errText string, usage *AgentUsage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.Status == "killed" || t.Status == "canceled" {
+		return
+	}
+	t.Status = status
+	if errText != "" {
+		t.Error = errText
+		t.Lines = append(t.Lines, AgentLine{Kind: "error", Text: errText, TS: time.Now().UnixMilli()})
+	}
+	if usage != nil {
+		t.Usage = usage
+	}
+	t.FinishedAt = time.Now().UnixMilli()
 }
 
 // reply 把 Codex 的回复写回「触发它的那个会话」并广播。
@@ -285,10 +483,10 @@ func (a *Agent) buildPrompt(history []Message) string {
 }
 
 // exec 调用一次 codex exec，返回它最后一条回复。
-func (a *Agent) exec(prompt string) (string, error) {
+func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error) {
 	outFile, err := os.CreateTemp("", "lanfile-agent-*.txt")
 	if err != nil {
-		return "", fmt.Errorf("创建输出文件失败：%w", err)
+		return "", nil, fmt.Errorf("创建输出文件失败：%w", err)
 	}
 	outPath := outFile.Name()
 	_ = outFile.Close()
@@ -301,6 +499,7 @@ func (a *Agent) exec(prompt string) (string, error) {
 		"exec",
 		"--skip-git-repo-check", // 工作目录不是 git 仓库也能跑
 		"--ephemeral",           // 不把这次会话写进 ~/.codex/sessions
+		"--json",                // 结构化事件流：执行的命令、回复、token 用量
 		"-s", "danger-full-access",
 		"-c", `approval_policy="never"`,
 		"-C", a.cwd,
@@ -318,32 +517,132 @@ func (a *Agent) exec(prompt string) (string, error) {
 		}
 	}
 	cmd.Env = append(env, "CODEX_HOME="+a.home)
-	// 单独进程组：超时后连同 codex 拉起的子进程一起杀，避免留下孤儿继续改文件
+	// 单独进程组：超时或手动终止时，连同 codex 拉起的子进程一起杀，避免留下孤儿继续改文件
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", nil, fmt.Errorf("建立输出管道失败：%w", err)
+	}
+	cmd.Stderr = cmd.Stdout // 报错也进同一条流，控制台里能看到
+
+	if err := cmd.Start(); err != nil {
+		return "", nil, fmt.Errorf("启动 codex 失败：%w", err)
 	}
 
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("超过 %s 未完成，已终止", a.timeout)
-	}
-	if err != nil {
-		tail := strings.TrimSpace(string(output))
-		if len(tail) > 200 {
-			tail = tail[len(tail)-200:]
+	task.mu.Lock()
+	task.pgid = cmd.Process.Pid // Setpgid 之后，进程组 id 等于子进程 pid
+	task.mu.Unlock()
+
+	// 边跑边读：每行都是一条 JSON 事件，解析后记进任务（控制台实时可见）
+	var usage *AgentUsage
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		if got := parseAgentEvent(scanner.Text(), task); got != nil {
+			usage = got
 		}
-		return "", fmt.Errorf("codex 退出异常：%v %s", err, tail)
+	}
+
+	waitErr := cmd.Wait()
+
+	task.mu.Lock()
+	task.pgid = 0 // 清掉引用，避免后续误杀复用到的 pid
+	killed := task.Status == "killed"
+	task.mu.Unlock()
+	if killed {
+		return "", usage, fmt.Errorf("已被主机终止")
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", usage, fmt.Errorf("超过 %s 未完成，已终止", a.timeout)
+	}
+	if waitErr != nil {
+		return "", usage, fmt.Errorf("codex 退出异常：%v", waitErr)
 	}
 
 	raw, err := os.ReadFile(outPath)
 	if err != nil {
-		return "", fmt.Errorf("读取回复失败：%w", err)
+		return "", usage, fmt.Errorf("读取回复失败：%w", err)
 	}
-	return truncate(strings.TrimSpace(string(raw)), agentReplyLimit), nil
+	return truncate(strings.TrimSpace(string(raw)), agentReplyLimit), usage, nil
+}
+
+// parseAgentEvent 解析 codex exec --json 的一行事件；返回该行里的 token 用量（如果有）。
+func parseAgentEvent(line string, task *agentTask) *AgentUsage {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
+	}
+
+	var event struct {
+		Type  string `json:"type"`
+		Usage *struct {
+			InputTokens       int64 `json:"input_tokens"`
+			CachedInputTokens int64 `json:"cached_input_tokens"`
+			OutputTokens      int64 `json:"output_tokens"`
+			ReasoningTokens   int64 `json:"reasoning_output_tokens"`
+		} `json:"usage"`
+		Item struct {
+			Type             string `json:"type"`
+			Text             string `json:"text"`
+			Command          string `json:"command"`
+			AggregatedOutput string `json:"aggregated_output"`
+			ExitCode         *int   `json:"exit_code"`
+		} `json:"item"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		// 解析不了就原样显示；过滤掉 codex 那句无意义的提示
+		if !strings.Contains(line, "Reading additional input from stdin") {
+			task.add("raw", truncate(line, 300))
+		}
+		return nil
+	}
+
+	switch event.Type {
+	case "item.started", "item.completed":
+		switch event.Item.Type {
+		case "command_execution":
+			if event.Type == "item.started" && event.Item.Command != "" {
+				task.add("command", "$ "+event.Item.Command)
+			}
+			if event.Type == "item.completed" {
+				if event.Item.AggregatedOutput != "" {
+					task.add("output", truncate(event.Item.AggregatedOutput, 2000))
+				}
+				if event.Item.ExitCode != nil && *event.Item.ExitCode != 0 {
+					task.add("error", fmt.Sprintf("命令退出码 %d", *event.Item.ExitCode))
+				}
+			}
+		case "agent_message":
+			if event.Item.Text != "" {
+				task.add("message", event.Item.Text)
+			}
+		case "reasoning":
+			if event.Item.Text != "" {
+				task.add("reasoning", event.Item.Text)
+			}
+		default:
+			if event.Item.Type != "" {
+				task.add("note", "["+event.Item.Type+"]")
+			}
+		}
+
+	case "turn.completed":
+		if event.Usage != nil {
+			return &AgentUsage{
+				InputTokens:       event.Usage.InputTokens,
+				CachedInputTokens: event.Usage.CachedInputTokens,
+				OutputTokens:      event.Usage.OutputTokens,
+				ReasoningTokens:   event.Usage.ReasoningTokens,
+			}
+		}
+
+	case "error":
+		task.add("error", truncate(event.Message, 500))
+	}
+	return nil
 }
 
 // truncate 按字符（rune）截断，避免中文被切坏。

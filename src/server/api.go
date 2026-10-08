@@ -24,6 +24,7 @@ type Event struct {
 	SelfID   string        `json:"selfId,omitempty"`
 	Name     string        `json:"name,omitempty"`
 	Host     bool          `json:"host,omitempty"`
+	CanAgent bool          `json:"canAgent,omitempty"`
 	Peers    int           `json:"peers"`
 	Session  *SessionInfo  `json:"session,omitempty"`
 	History  []Message     `json:"history"`
@@ -88,15 +89,16 @@ func (a *App) serveClient(client *Client) {
 
 	session := a.sessions.Current()
 	a.sendTo(client, Event{
-		Type:    "init",
-		SelfID:  client.id,
-		Name:    client.name,
-		Host:    client.host,
-		Peers:   a.hub.Count(),
-		Session: a.sessions.Info(session),
-		History: a.sessions.Messages(session),
-		Files:   a.sessions.Files(session),
-		LAN:     a.lanAddresses(),
+		Type:     "init",
+		SelfID:   client.id,
+		Name:     client.name,
+		Host:     client.host,
+		CanAgent: client.host || client.advanced, // 决定前端是否显示 @Codex 快捷按钮
+		Peers:    a.hub.Count(),
+		Session:  a.sessions.Info(session),
+		History:  a.sessions.Messages(session),
+		Files:    a.sessions.Files(session),
+		LAN:      a.lanAddresses(),
 	})
 
 	for {
@@ -351,6 +353,64 @@ func (a *App) broadcast(event Event) {
 
 /* ---------------- 身份、链接与邀请（服务器版） ---------------- */
 
+/* ---------------- Codex 控制台（仅主机） ---------------- */
+
+// handleAgentTasks 返回最近的任务列表（含实时输出），只给主机看。
+func (a *App) handleAgentTasks(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能查看 Codex 控制台"})
+		return
+	}
+
+	tasks := a.agent.Tasks() // agent 为 nil 时返回空列表
+	running, queued := 0, 0
+	var todayTokens int64
+	for _, task := range tasks {
+		switch task.Status {
+		case "running":
+			running++
+		case "queued":
+			queued++
+		}
+		if task.Usage != nil {
+			todayTokens += task.Usage.InputTokens + task.Usage.OutputTokens
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":     a.agent != nil,
+		"trigger":     a.agentTrigger,
+		"cwd":         a.agentCwd,
+		"timeout":     int(a.agentTimeout.Seconds()),
+		"running":     running,
+		"queued":      queued,
+		"tasks":       tasks,
+		"totalTokens": todayTokens,
+	})
+}
+
+// handleAgentTaskAction 处理 /api/agent/tasks/{id}/kill。
+func (a *App) handleAgentTaskAction(w http.ResponseWriter, r *http.Request) {
+	if !a.auth.IdentityOf(nil, r).IsHost() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只有主机能操作 Codex 任务"})
+		return
+	}
+
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/agent/tasks/"), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "kill" || r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+
+	if a.agent == nil || !a.agent.Kill(parts[0]) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "任务不存在或已经结束"})
+		return
+	}
+	log.Printf("主机终止了 Codex 任务 %s", parts[0])
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "已终止"})
+}
+
 // handleWhoami 返回当前请求的身份，前端判断与排查都用得上。
 func (a *App) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	identity := a.auth.IdentityOf(nil, r)
@@ -494,7 +554,7 @@ func (a *App) handleDevices(w http.ResponseWriter, r *http.Request) {
 		devices = append(devices, map[string]any{
 			"key": client.Key, "role": roleName(client.Host), "name": client.Name,
 			"advanced": client.Advanced,
-			"ip": client.IP, "ua": client.UA, "online": true, "connectedAt": client.ConnectedAt,
+			"ip":       client.IP, "ua": client.UA, "online": true, "connectedAt": client.ConnectedAt,
 		})
 	}
 

@@ -8,6 +8,8 @@ const el = {
   fileCountBadge: document.getElementById('fileCountBadge'),
   uploadTray: document.getElementById('uploadTray'),
   composer: document.getElementById('composer'),
+  composerQuick: document.getElementById('composerQuick'),
+  codexChip: document.getElementById('codexChip'),
   input: document.getElementById('input'),
   pickTop: document.getElementById('pickTop'),
   pickChat: document.getElementById('pickChat'),
@@ -34,6 +36,7 @@ const el = {
   sessionModal: document.getElementById('sessionModal'),
   sessionList: document.getElementById('sessionList'),
   linkBtn: document.getElementById('linkBtn'),
+  consoleBtn: document.getElementById('consoleBtn'),
   linkModal: document.getElementById('linkModal'),
   hostLinkInput: document.getElementById('hostLinkInput'),
   hostLinkCopy: document.getElementById('hostLinkCopy'),
@@ -100,6 +103,7 @@ const state = {
   hostLink: '',
   invites: [],
   devices: [],
+  canAgent: false,
 };
 
 // 旧版本的自动昵称（我的电脑-3F）作废，交给服务端重新分配
@@ -384,6 +388,7 @@ function connect() {
       case 'init':
         state.selfId = data.selfId;
         state.host = Boolean(data.host);
+        state.canAgent = Boolean(data.canAgent);
         state.peers = data.peers || 1;
         state.session = data.session;
         state.messages = data.history || [];
@@ -467,7 +472,9 @@ function renderSession() {
   el.sessionName.textContent = state.session ? formatSession(state.session.id) : '—';
   el.historyBtn.hidden = !state.host; // 只有主机能切换历史会话
   el.linkBtn.hidden = !state.host; // 只有主机能看主机链接与邀请管理
+  el.consoleBtn.hidden = !state.host; // 只有主机能进 Codex 控制台
   el.qrBtn.hidden = !state.host; // 二维码 = 一次性邀请，只有主机能发
+  el.composerQuick.hidden = !state.canAgent; // @Codex 快捷按钮：主机与高级邀请用户可见
 }
 
 function thumbHtml(file) {
@@ -1020,6 +1027,9 @@ function openLinkModal() {
 
 el.linkBtn.addEventListener('click', openLinkModal);
 
+// 新页签打开 Codex 控制台（路径前缀随当前页面，服务器版是 /lanfile/agent）
+el.consoleBtn.addEventListener('click', () => window.open(`${BASE}agent`, '_blank'));
+
 el.hostLinkCopy.addEventListener('click', () => copyText(state.hostLink));
 
 el.hostLinkRotate.addEventListener('click', async () => {
@@ -1313,6 +1323,14 @@ for (const picker of [el.pickTop, el.pickChat]) {
 }
 
 el.attachBtn.addEventListener('click', () => el.pickChat.click());
+
+// 点一下把 @Codex 填进输入框（触发词不区分大小写，服务端照样认）
+el.codexChip.addEventListener('click', () => {
+  const text = el.input.value;
+  el.input.value = text && !text.endsWith(' ') ? `${text} @Codex ` : `${text}@Codex `;
+  el.input.focus();
+  autoGrow();
+});
 
 el.fileList.addEventListener('click', (event) => {
   const reveal = event.target.closest('[data-reveal]');

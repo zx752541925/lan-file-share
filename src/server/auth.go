@@ -85,9 +85,9 @@ func (i Identity) DeviceKey() string {
 
 // Invite 是主机发出的某一张邀请链接。
 type Invite struct {
-	ID        string `json:"id"`        // 邀请码，同时是链接里的 code
-	Note      string `json:"note"`      // 备注：发给谁
-	Advanced  bool   `json:"advanced"`  // 勾选后对方可触发 Codex（等同于"高级权限"）
+	ID        string `json:"id"`       // 邀请码，同时是链接里的 code
+	Note      string `json:"note"`     // 备注：发给谁
+	Advanced  bool   `json:"advanced"` // 勾选后对方可触发 Codex（等同于"高级权限"）
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt"` // 未被使用时的失效时间
 	UsedAt    int64  `json:"usedAt,omitempty"`

@@ -32,6 +32,11 @@ type App struct {
 	publicURL string
 	base      string // 访问子路径，形如 / 或 /lanfile/（前后都有斜杠）
 	agent     *Agent // 聊天室里的 Codex，未开启时为 nil
+
+	// 以下几个只在控制台页面上展示，方便主机确认配置
+	agentTrigger string
+	agentCwd     string
+	agentTimeout time.Duration
 }
 
 func main() {
@@ -94,6 +99,9 @@ func main() {
 	if *agentOn {
 		app.agent = newAgent(*agentName, *agentTrigger, *agentCwd,
 			*agentHome, time.Duration(*agentTimeout)*time.Second, *dataDir, *agentNotify)
+		app.agentTrigger = *agentTrigger
+		app.agentCwd = *agentCwd
+		app.agentTimeout = time.Duration(*agentTimeout) * time.Second
 	}
 
 	chunks := newChunkedUploads(filepath.Join(*dataDir, "tmp"), app)
@@ -115,6 +123,9 @@ func main() {
 	mux.HandleFunc("/api/invites", app.handleInvites)
 	mux.HandleFunc("/api/invites/", app.handleInviteByID)
 	mux.HandleFunc("/api/devices", app.handleDevices)
+	mux.HandleFunc("/api/agent/tasks", app.handleAgentTasks)
+	mux.HandleFunc("/api/agent/tasks/", app.handleAgentTaskAction)
+	mux.HandleFunc("/agent", app.handleConsole(pages, version))
 	mux.Handle("/", staticHandler(pages, version))
 
 	server := &http.Server{
@@ -268,12 +279,38 @@ func staticHandler(fsys fs.FS, version string) http.Handler {
 // assetsVersion 用前端文件内容算出版本号，内容不变则版本号不变。
 func assetsVersion(fsys fs.FS) string {
 	hash := fnv.New64a()
-	for _, name := range []string{"index.html", "styles.css", "app.js"} {
+	for _, name := range []string{"index.html", "styles.css", "app.js", "agent.html"} {
 		if raw, err := fs.ReadFile(fsys, name); err == nil {
 			_, _ = hash.Write(raw)
 		}
 	}
 	return strconv.FormatUint(hash.Sum64(), 36)
+}
+
+// pageHandler 直接吐一个页面文件，并把 __V__ 换成资源版本号（控制台页面用）。
+func pageHandler(fsys fs.FS, version, name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(bytes.ReplaceAll(raw, []byte("__V__"), []byte(version)))
+	}
+}
+
+// handleConsole 提供 Codex 控制台页面：只有主机能打开，其他人直接送回聊天页。
+func (a *App) handleConsole(pages fs.FS, version string) http.HandlerFunc {
+	serve := pageHandler(pages, version, "agent.html")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !a.auth.IdentityOf(nil, r).IsHost() {
+			http.Redirect(w, r, a.base, http.StatusFound)
+			return
+		}
+		serve(w, r)
+	}
 }
 
 func envOr(key, fallback string) string {
@@ -369,6 +406,12 @@ func (a *App) entry(next http.Handler) http.Handler {
 		query := r.URL.Query()
 
 		if key := query.Get("host"); key != "" {
+			// 已经有主机会话的浏览器再点旧链接（或启动器每次拿新链接、浏览器里存着旧 cookie）时，
+			// 不该被挡在"链接无效"页外面，直接放行；顺便也不会白白消耗一张还有效的密钥。
+			if a.auth.IdentityOf(nil, r).IsHost() {
+				a.redirectClean(w, r)
+				return
+			}
 			if a.auth.RedeemHostKey(key) {
 				a.auth.GrantHost(w, r)
 				log.Printf("主机已通过一次性链接登录（%s）", clientIP(r))
@@ -486,6 +529,7 @@ func templateEscape(text string) string {
 	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
 	return replacer.Replace(text)
 }
+
 // fatal 出错时在 Windows 上等一次回车，避免双击运行时窗口一闪而过看不到原因。
 func fatal(format string, args ...any) {
 	log.Printf("错误："+format, args...)

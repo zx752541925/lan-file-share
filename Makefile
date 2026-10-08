@@ -10,8 +10,9 @@
 BINARY := bin/lanfile-server
 WINDOWS_BINARY := dist/lanfile-server.exe
 LINUX_BINARY := bin/lanfile-server-linux
+LAUNCHER_BINARY := dist/lanfile-start.exe
 
-.PHONY: run build build-windows build-linux deploy vet clean
+.PHONY: run build build-windows build-linux build-launcher deploy vet clean
 
 # 本地开发：直接跑源码，改前端刷新浏览器即可生效（优先读磁盘上的 src/web）
 run:
@@ -29,6 +30,11 @@ build-windows:
 build-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o $(LINUX_BINARY) ./src/server
 
+# Windows 双击启动器：唤醒 WSL → 启动服务 → 弹窗显示主机地址 → 打开浏览器
+# -H=windowsgui 让 exe 不带控制台黑窗口（错误也用弹窗提示）
+build-launcher:
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H=windowsgui" -o $(LAUNCHER_BINARY) ./tools/winlauncher
+
 # 编译并部署到服务器：等价于 build-linux + scripts/deploy.sh
 # 目标主机默认取 ssh 别名 myecs，可用 LANFILE_DEPLOY_HOST=别名 覆盖
 deploy: build-linux
@@ -40,4 +46,4 @@ vet:
 
 # 清理构建产物（三个都清；src/、data/ 不动）
 clean:
-	rm -f $(BINARY) $(LINUX_BINARY) $(WINDOWS_BINARY)
+	rm -f $(BINARY) $(LINUX_BINARY) $(WINDOWS_BINARY) $(LAUNCHER_BINARY)
