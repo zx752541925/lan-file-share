@@ -14,6 +14,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -798,11 +799,16 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 			ReasoningTokens   int64 `json:"reasoning_output_tokens"`
 		} `json:"usage"`
 		Item struct {
-			Type             string `json:"type"`
-			Text             string `json:"text"`
-			Command          string `json:"command"`
-			AggregatedOutput string `json:"aggregated_output"`
-			ExitCode         *int   `json:"exit_code"`
+			Type             string          `json:"type"`
+			Text             string          `json:"text"`
+			Command          string          `json:"command"`
+			AggregatedOutput string          `json:"aggregated_output"`
+			ExitCode         *int            `json:"exit_code"`
+			Server           string          `json:"server"`
+			Tool             string          `json:"tool"`
+			Arguments        json.RawMessage `json:"arguments"`
+			Result           json.RawMessage `json:"result"`
+			Error            json.RawMessage `json:"error"`
 		} `json:"item"`
 		Message string `json:"message"`
 	}
@@ -836,6 +842,21 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 			if event.Item.Text != "" {
 				task.add("message", event.Item.Text)
 			}
+		case "mcp_tool_call":
+			label := strings.TrimPrefix(event.Item.Server+"."+event.Item.Tool, ".")
+			if label == "" {
+				label = "MCP 工具"
+			}
+			if event.Type == "item.started" {
+				task.add("mcp", fmt.Sprintf("调用 %s %s", label, compactJSON(event.Item.Arguments, 160)))
+			} else {
+				if len(event.Item.Error) > 0 && string(event.Item.Error) != "null" {
+					task.add("error", fmt.Sprintf("%s 出错：%s", label, compactJSON(event.Item.Error, 200)))
+				} else {
+					task.add("mcp", fmt.Sprintf("%s 返回 %s", label, compactJSON(event.Item.Result, 300)))
+				}
+			}
+
 		case "reasoning":
 			if event.Item.Text != "" {
 				task.add("reasoning", event.Item.Text)
@@ -863,6 +884,18 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 		return nil, event.ThreadID
 	}
 	return nil, ""
+}
+
+// compactJSON 把一段 JSON 压成单行并截断，用于控制台里显示 MCP 参数/结果。
+func compactJSON(raw json.RawMessage, limit int) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "（空）"
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return truncate(string(raw), limit)
+	}
+	return truncate(buf.String(), limit)
 }
 
 // truncate 按字符（rune）截断，避免中文被切坏。

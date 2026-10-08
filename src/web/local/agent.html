@@ -70,6 +70,7 @@
     .line.error .text { color: #ff9d9d; }
     .line.note .text { color: #f0c674; }
     .line.reasoning .text { color: #c9a6ff; }
+    .line.mcp .text { color: #6ee7d7; }
     /* 命令与输出默认折叠：summary 显示一行预览，展开才看全文 */
     details.line { display: block; }
     details.line > summary {
@@ -212,7 +213,7 @@
       return { queued: '排队中', running: '执行中', done: '已完成', failed: '失败', killed: '已终止', canceled: '已取消' }[status] || status;
     }
     function kindText(kind) {
-      return { command: '命令', output: '输出', message: '回复', error: '错误', note: '说明', raw: '原始', reasoning: '思考' }[kind] || kind;
+      return { command: '命令', output: '输出', message: '回复', error: '错误', note: '说明', raw: '原始', reasoning: '思考', mcp: 'MCP' }[kind] || kind;
     }
     function escapeHtml(text) {
       return String(text).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));

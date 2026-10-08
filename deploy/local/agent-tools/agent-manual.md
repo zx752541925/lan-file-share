@@ -41,10 +41,11 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 
 | 工具 | 参数 | 用途 |
 | --- | --- | --- |
-| `gui_open` | `path` | 打开程序 / 网址 |
+| `gui_open` | `path`、`restart?` | 打开程序 / 网址。**进程在跑但窗口看不见（托盘）时用 `restart=true`**，它会（必要时用提权）结束并重启，然后确认窗口真的出现 |
 | `gui_click` | `text`（界面文字）或 `name`（控件名）、`window?`、`dry_run?` | 点击。内部自动处理：找窗口 → 查权限 → 置前 → 控件树 → 找不到就 OCR → 需要时用提权进程点 |
 | `gui_type` | `text`、`window?` | 往窗口输入文本 |
 | `gui_read` | — | 读屏：把屏幕 OCR 成文字（**你无法看图片，用这个了解界面**） |
+| `gui_windows` | `process?` | 列出窗口**及状态**：可见 / 最小化 / 隐藏（托盘）。找窗口、判断程序有没有窗口，先用它 |
 | `gui_shot` | `save_to?` | 截图，返回文件路径（要发给人看就交给发文件工具） |
 
 **标准流程**（照这个顺序，不要跳步）：
@@ -59,6 +60,9 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 - **不要**用 shell 手写 PowerShell / 内联 C# 去点界面（那是没有工具时的老办法，慢且容易走偏）
 - **不要**去读 `~/.codex/win-gui-tools/` 里的脚本源码（那是给人看的，不是给你读的）
 - **不要**盲目猜坐标点击；坐标应该来自 `gui_read` 的输出
+- **不要**自己写 PowerShell 去枚举窗口、结束进程、或操作窗口状态 —— 用 `gui_windows` / `gui_open -restart`。
+  原因：Windows 的 UIPI 会拦掉普通权限进程对**管理员程序**的一切窗口操作（实测 `ShowWindow`/`taskkill` 都返回 False 或拒绝访问），自己写脚本只会白折腾
+- **同一个目标连续失败 2 次就停下**，用 `gui_shot` 截图 + 一句话说明卡在哪，让人判断
 
 > 底层实现：`win-gui-tools/gui.ps1` 是一条确定性流水线，`win-gui-mcp` 把它暴露成上面的工具。
 > 如果你的工具列表里没有 `gui_*`（说明 MCP 没加载），再用 shell 调用
