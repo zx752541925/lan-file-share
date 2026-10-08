@@ -131,7 +131,7 @@
     let tasks = [];
     let stopped = false;
     let expandAll = false;            // 「全部展开」按钮：控制折叠项默认是否打开
-    const opened = new Set();         // 用户手动展开过的行（刷新后保持）
+    const userOpen = new Map();       // 用户手动点开/收起过的行（刷新后保持）
 
     const foldable = (kind) => kind === 'command' || kind === 'output';
 
@@ -190,8 +190,9 @@
                     <span class="text">${body}</span>
                   </div>`;
               }
-              const open = expandAll || opened.has(key) ? ' open' : '';
-              return `<details class="line ${line.kind}" data-key="${key}"${open}>
+              // 用户手动动过的行以手动状态为准，其余跟随全局开关
+              const open = userOpen.has(key) ? userOpen.get(key) : expandAll;
+              return `<details class="line ${line.kind}" data-key="${key}"${open ? ' open' : ''}>
                   <summary>
                     <span class="kind">${kindText(line.kind)}</span>
                     <span class="text">${preview}</span>
@@ -245,20 +246,20 @@
       render();
     });
 
-    // 折叠状态：toggle 不冒泡，用捕获阶段记录用户展开过哪些行（刷新时保持）
-    el.stream.addEventListener(
-      'toggle',
-      (event) => {
-        const node = event.target;
-        if (!node.dataset?.key) return;
-        if (node.open) opened.add(node.dataset.key);
-        else opened.delete(node.dataset.key);
-      },
-      true
-    );
+    // 折叠状态：只记"用户点了哪几行"（用 click 而不是 toggle，
+    // 否则程序化渲染也会触发 toggle，导致「全部折叠」失效）
+    el.stream.addEventListener('click', (event) => {
+      const summary = event.target.closest('summary');
+      if (!summary) return;
+      const node = summary.parentElement;
+      if (!node?.dataset?.key) return;
+      // 浏览器在这一轮事件之后才切换 open，等一拍再读
+      setTimeout(() => userOpen.set(node.dataset.key, node.open), 0);
+    });
 
     el.fold.addEventListener('click', () => {
       expandAll = !expandAll;
+      userOpen.clear(); // 清掉手动记录，这样「全部展开」和「全部折叠」都生效
       el.fold.textContent = expandAll ? '全部折叠' : '全部展开';
       render();
     });

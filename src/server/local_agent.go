@@ -22,10 +22,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"lanfile"
 )
 
 const (
@@ -75,6 +78,8 @@ type agentTask struct {
 	mu       sync.Mutex
 	pgid     int  // 进程组 id，用于终止（连同子进程一起杀）
 	canceled bool // 排队中就被取消
+	// goodCommands 记录这次任务里成功执行的命令，用于沉淀经验
+	goodCommands []string
 }
 
 func (t *agentTask) add(kind, text string) {
@@ -108,6 +113,8 @@ type Agent struct {
 	notify  bool          // 失败时是否在聊天里发一条提示
 	home    string        // 独立的 CODEX_HOME：自带一份 config.toml 和 AGENTS.md
 	baseURL string        // 可选：把 provider 的 base_url 改写成它（例如指向本地 shim）
+	// 经验库：记录"做过的任务 + 当时成功的命令"，下次同类任务直接照做
+	expPath string
 
 	jobs chan agentJob
 
@@ -125,19 +132,6 @@ type agentJob struct {
 	message   Message
 	task      *agentTask
 }
-
-// agentHomeAGENTS 是这个成员自己的行为规范。必须用独立 CODEX_HOME 的原因：
-// ~/.codex/AGENTS.md 里有「动手前先确认，要用户回复"执行修改"」这类规则，
-// 聊天室里不可能满足它，嵌套的 codex 会拒绝干活（实测过）。给它一份自己的规范即可。
-const agentHomeAGENTS = `# 聊天室成员 Codex
-
-你是局域网聊天室里的一个成员，昵称 Codex，可以直接操作这台机器的文件。
-
-- 主机已经在聊天里授权你直接执行任务，**不要再请求任何确认**（不要要求对方回复「执行修改」之类的话）。
-- 需要跑命令就直接跑，不要只给计划；做完用一两句话说明结果。
-- 只做被明确要求的事，不要扩大范围，也不要执行与聊天内容无关的操作。
-- 回复保持简短，用中文。
-`
 
 // newAgent 准备 agent：解析 codex 路径、确定工作目录并启动串行执行协程。
 // 找不到 codex 时返回 nil（调用方据此关闭功能），不会让服务起不来。
@@ -174,8 +168,17 @@ func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration
 		log.Printf("agent：创建 CODEX_HOME %s 失败：%v，聊天室 Codex 功能已关闭", homeDir, err)
 		return nil
 	}
-	if err := os.WriteFile(filepath.Join(homeDir, "AGENTS.md"), []byte(agentHomeAGENTS), 0o644); err != nil {
-		log.Printf("agent：写入 AGENTS.md 失败：%v", err)
+	// 规则文件：不存在时写入默认值（来自 deploy/local/agent-AGENTS.md，已编译进二进制）；
+	// 已存在则沿用 —— 这样在聊天里让 Codex 改过的规则，重启后不会被冲掉。
+	rulesPath := filepath.Join(homeDir, "AGENTS.md")
+	if _, statErr := os.Stat(rulesPath); statErr != nil {
+		if err := os.WriteFile(rulesPath, lanfile.DefaultAgentRules, 0o644); err != nil {
+			log.Printf("agent：写入默认规则失败：%v", err)
+		} else {
+			log.Printf("agent：已写入默认规则 %s（源 deploy/local/agent-AGENTS.md）", rulesPath)
+		}
+	} else {
+		log.Printf("agent：沿用已有规则 %s（要恢复默认：删掉该文件后重启服务）", rulesPath)
 	}
 
 	agent := &Agent{
@@ -187,6 +190,7 @@ func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration
 		notify:  notify,
 		home:    homeDir,
 		baseURL: strings.TrimSpace(baseURL),
+		expPath: filepath.Join(homeDir, "experiences.json"),
 		jobs:    make(chan agentJob, agentQueueSize),
 		seen:    make(map[string]bool),
 	}
@@ -198,10 +202,21 @@ func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration
 	if agent.baseURL != "" {
 		log.Printf("agent：provider base_url 将被改写为 %s（思考过程会经它中转）", agent.baseURL)
 	}
+	if exp := agent.experiences(); len(exp) > 0 {
+		log.Printf("agent：已加载 %d 条以往经验（%s）", len(exp), agent.expPath)
+	}
 	return agent
 }
 
-// baseURLPattern 匹配 provider 配置里的 base_url 行，用于改写。
+// readTrimmed 读一个小文本文件并去掉首尾空白（不存在就返回空串）。
+func readTrimmed(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
 var baseURLPattern = regexp.MustCompile(`(?m)^(\s*base_url\s*=\s*)"[^"]*"`)
 
 // syncConfig 把 ~/.codex/config.toml 同步到自己的 CODEX_HOME。
@@ -354,6 +369,152 @@ func (a *Agent) Kill(id string) bool {
 }
 
 // markSeen 记录已处理的消息，重复的返回 false；超出上限时淘汰最旧的。
+
+// AgentExperience 是一条"做过的事"：任务 + 当时成功的命令 + 用过几次。
+type AgentExperience struct {
+	Prompt   string   `json:"prompt"`
+	Commands []string `json:"commands"`
+	Count    int      `json:"count"`
+	LastUsed int64    `json:"lastUsed"`
+}
+
+// experiences 读取经验库，按最近使用排序（最多 30 条）。
+func (a *Agent) experiences() []AgentExperience {
+	raw, err := os.ReadFile(a.expPath)
+	if err != nil {
+		return nil
+	}
+	var list []AgentExperience
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil
+	}
+	sort.SliceStable(list, func(i, j int) bool { return list[i].LastUsed > list[j].LastUsed })
+	if len(list) > 30 {
+		list = list[:30]
+	}
+	return list
+}
+
+// experienceKey 把任务描述归一化成"意图"：去掉触发词、大小写、空白与标点，
+// 这样「@codex 截屏」「@Codex 截屏。」「截屏」会归为同一条经验。
+func experienceKey(prompt string) string {
+	text := strings.ToLower(prompt)
+	text = strings.ReplaceAll(text, "@codex", "")
+	var builder strings.Builder
+	for _, r := range text {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r >= 0x4e00 && r <= 0x9fff: // 汉字保留
+			builder.WriteRune(r)
+		}
+	}
+	key := builder.String()
+	if len([]rune(key)) > 24 {
+		key = string([]rune(key)[:24])
+	}
+	return key
+}
+
+// learn 记录这次任务的成功命令：相同的命令组合只留一条（累加次数、刷新时间），
+// 所以经验库不会随次数膨胀，只随"新做法"增长。
+func (a *Agent) learn(task *agentTask) {
+	task.mu.Lock()
+	commands := append([]string(nil), task.goodCommands...)
+	prompt := task.Prompt
+	task.mu.Unlock()
+
+	if len(commands) == 0 {
+		return
+	}
+	if len(commands) > 3 {
+		commands = commands[len(commands)-3:] // 只留最后几步，前面的多是探索
+	}
+
+	// 按「任务意图」去重（同一件事无论命令写法怎么变，都只留一条最新的做法）
+	key := experienceKey(prompt)
+	list := a.experiences()
+	now := time.Now().UnixMilli()
+
+	for i := range list {
+		if experienceKey(list[i].Prompt) == key {
+			list[i].Count++
+			list[i].LastUsed = now
+			list[i].Prompt = truncate(prompt, 60) // 用最近一次的措辞
+			list[i].Commands = commands           // 用最近一次跑通的做法
+			_ = a.saveExperiences(list)
+			return
+		}
+	}
+
+	list = append(list, AgentExperience{
+		Prompt:   truncate(prompt, 60),
+		Commands: commands,
+		Count:    1,
+		LastUsed: now,
+	})
+	_ = a.saveExperiences(list)
+}
+
+func (a *Agent) saveExperiences(list []AgentExperience) error {
+	// 先按"任务意图"归并：同一件事只保留一条（用最新的做法，次数累加），
+	// 顺手清掉历史遗留的重复条目
+	merged := make(map[string]AgentExperience, len(list))
+	for _, exp := range list {
+		key := experienceKey(exp.Prompt)
+		if old, ok := merged[key]; ok {
+			if exp.LastUsed >= old.LastUsed {
+				exp.Count += old.Count
+				merged[key] = exp
+			} else {
+				old.Count += exp.Count
+				merged[key] = old
+			}
+			continue
+		}
+		merged[key] = exp
+	}
+	list = list[:0]
+	for _, exp := range merged {
+		list = append(list, exp)
+	}
+
+	sort.SliceStable(list, func(i, j int) bool { return list[i].LastUsed > list[j].LastUsed })
+	if len(list) > 30 {
+		list = list[:30]
+	}
+	raw, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.expPath, raw, 0o600)
+}
+
+// experienceText 把经验渲染成注入 prompt 的短文本（最多 max 条，每条命令截断）。
+func (a *Agent) experienceText(max, perCommand int) string {
+	list := a.experiences()
+	if len(list) == 0 || max <= 0 {
+		return ""
+	}
+	if len(list) > max {
+		list = list[:max]
+	}
+
+	var builder strings.Builder
+	for _, exp := range list {
+		builder.WriteString(fmt.Sprintf("- %s（用过 %d 次）：", exp.Prompt, exp.Count))
+		for i, cmd := range exp.Commands {
+			if i > 0 {
+				builder.WriteString(" 然后 ")
+			}
+			builder.WriteString(truncate(cmd, perCommand))
+		}
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+// markSeen 记录已处理的消息，重复的返回 false；超出上限时淘汰最旧的。
 func (a *Agent) markSeen(id string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -398,13 +559,12 @@ func (a *Agent) process(job agentJob) {
 		return
 	}
 	history := job.app.sessions.Messages(session)
-	prompt := a.buildPrompt(history)
 
 	started := time.Now()
 	log.Printf("agent：开始处理消息 %s（会话 %s，历史 %d 条）", job.message.ID, job.sessionID, len(history))
 	task.add("note", fmt.Sprintf("开始处理：%s", task.Prompt))
 
-	reply, usage, err := a.exec(task, prompt)
+	reply, usage, err := a.execWithSession(task, history)
 	elapsed := time.Since(started).Round(time.Millisecond)
 	if err != nil {
 		log.Printf("agent：执行失败（耗时 %s）：%v", elapsed, err)
@@ -419,6 +579,7 @@ func (a *Agent) process(job agentJob) {
 	}
 	log.Printf("agent：处理完成（耗时 %s，回复 %d 字）", elapsed, len([]rune(reply)))
 	task.finish("done", "", usage)
+	a.learn(task) // 把这次成功的命令沉淀下来，下次直接参考
 	// 事件流里通常已经带了最终回复，避免重复记一条
 	task.mu.Lock()
 	hasReply := false
@@ -473,6 +634,21 @@ func (a *Agent) reply(job agentJob, text string) {
 func (a *Agent) buildPrompt(history []Message) string {
 	var builder strings.Builder
 	builder.WriteString("你是局域网聊天室里的成员，昵称 " + a.name + "，可以直接操作这台机器的文件。\n\n")
+
+	// 操作手册：每次注入（内容固定且短，省得它自己去翻源码）
+	if len(lanfile.AgentManual) > 0 {
+		builder.WriteString("【操作手册】（照这里的做法执行，不要自己探索项目源码）\n")
+		builder.WriteString(strings.TrimSpace(string(lanfile.AgentManual)))
+		builder.WriteString("\n\n")
+	}
+
+	// 以往经验：做过的同类任务当时用了什么命令，直接照做
+	if exp := a.experienceText(10, 140); exp != "" {
+		builder.WriteString("【以往经验】（同类任务照这里的做法执行，不要重新摸索）\n")
+		builder.WriteString(exp)
+		builder.WriteString("\n")
+	}
+
 	builder.WriteString("最近的对话：\n")
 
 	if len(history) > agentHistoryLimit {
@@ -502,7 +678,14 @@ func (a *Agent) buildPrompt(history []Message) string {
 	return builder.String()
 }
 
-// exec 调用一次 codex exec，返回它最后一条回复。
+// execWithSession 每次都开新会话（--ephemeral），但 prompt 里带着
+// 「操作手册 + 以往经验」：做过的任务下次直接照做，上下文却不会随会话累积。
+// 这就是"不记住对话、只记住怎么做"的设计。
+func (a *Agent) execWithSession(task *agentTask, history []Message) (string, *AgentUsage, error) {
+	return a.exec(task, a.buildPrompt(history))
+}
+
+// exec 调用一次 codex exec（每次全新会话，--ephemeral），返回最后一条回复。
 func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error) {
 	outFile, err := os.CreateTemp("", "lanfile-agent-*.txt")
 	if err != nil {
@@ -518,8 +701,8 @@ func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error
 	args := []string{
 		"exec",
 		"--skip-git-repo-check", // 工作目录不是 git 仓库也能跑
-		"--ephemeral",           // 不把这次会话写进 ~/.codex/sessions
-		"--json",                // 结构化事件流：执行的命令、回复、token 用量
+		"--ephemeral",           // 每次都是全新会话，不在磁盘上堆历史
+		"--json",                // 结构化事件流：命令、回复、token 用量
 		"-s", "danger-full-access",
 		"-c", `approval_policy="never"`,
 		"-C", a.cwd,
@@ -559,7 +742,7 @@ func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
-		if got := parseAgentEvent(scanner.Text(), task); got != nil {
+		if got, _ := parseAgentEvent(scanner.Text(), task); got != nil {
 			usage = got
 		}
 	}
@@ -589,15 +772,16 @@ func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error
 }
 
 // parseAgentEvent 解析 codex exec --json 的一行事件；返回该行里的 token 用量（如果有）。
-func parseAgentEvent(line string, task *agentTask) *AgentUsage {
+func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return nil
+		return nil, ""
 	}
 
 	var event struct {
-		Type  string `json:"type"`
-		Usage *struct {
+		Type     string `json:"type"`
+		ThreadID string `json:"thread_id"`
+		Usage    *struct {
 			InputTokens       int64 `json:"input_tokens"`
 			CachedInputTokens int64 `json:"cached_input_tokens"`
 			OutputTokens      int64 `json:"output_tokens"`
@@ -617,7 +801,7 @@ func parseAgentEvent(line string, task *agentTask) *AgentUsage {
 		if !strings.Contains(line, "Reading additional input from stdin") {
 			task.add("raw", truncate(line, 300))
 		}
-		return nil
+		return nil, ""
 	}
 
 	switch event.Type {
@@ -633,6 +817,9 @@ func parseAgentEvent(line string, task *agentTask) *AgentUsage {
 				}
 				if event.Item.ExitCode != nil && *event.Item.ExitCode != 0 {
 					task.add("error", fmt.Sprintf("命令退出码 %d", *event.Item.ExitCode))
+				} else if event.Item.Command != "" {
+					// 记下成功执行的命令，任务结束后沉淀到 learned.md
+					task.goodCommands = append(task.goodCommands, event.Item.Command)
 				}
 			}
 		case "agent_message":
@@ -656,13 +843,16 @@ func parseAgentEvent(line string, task *agentTask) *AgentUsage {
 				CachedInputTokens: event.Usage.CachedInputTokens,
 				OutputTokens:      event.Usage.OutputTokens,
 				ReasoningTokens:   event.Usage.ReasoningTokens,
-			}
+			}, ""
 		}
 
 	case "error":
 		task.add("error", truncate(event.Message, 500))
+
+	case "thread.started":
+		return nil, event.ThreadID
 	}
-	return nil
+	return nil, ""
 }
 
 // truncate 按字符（rune）截断，避免中文被切坏。

@@ -56,6 +56,49 @@ systemctl --user status deepseek-shim    # 推理摘要中转（已 enable，随
 sudo loginctl enable-linger xu           # 让用户级服务在无登录会话时也活着（已设置）
 ```
 
+## 5.1 聊天室 Codex 的规则文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `deploy/local/agent-AGENTS.md` | **默认规则**（进 Git；改这里 + 重新编译 = 改默认值） |
+| `data/agent-home/AGENTS.md` | agent 实际读取的规则（在数据目录里，不入库） |
+
+写入逻辑（见 `src/server/local_agent.go`）：
+
+- 该文件**不存在** → 写入默认内容（`deploy/local/agent-AGENTS.md`，编译时已嵌进二进制）
+- 该文件**已存在** → 沿用，启动日志会打印「沿用已有规则」
+
+两种改法：
+
+- **临场改**（立刻生效、重启不丢）：直接编辑 `data/agent-home/AGENTS.md`，或让聊天室 Codex 自己改
+- **改默认值**（换设备/新环境生效）：改 `deploy/local/agent-AGENTS.md` → `make build` → `systemctl --user restart lanfile`
+
+恢复默认（丢弃临场改动）：
+
+```bash
+rm data/agent-home/AGENTS.md && systemctl --user restart lanfile
+```
+
+## 5.2 让聊天室 Codex「越用越好用」
+
+两层，各自解决一个问题：
+
+| 层 | 内容 | 解决什么 |
+| --- | --- | --- |
+| **能力指南**（静态，人工维护） | `deploy/local/agent-tools/agent-manual.md`：先说清"你在 WSL，但默认操作 Windows"，再教**怎么查 Windows 有什么工具**（`Get-Command` / `where.exe` / `Get-Help` / 看 `System32`），最后给一张"常用内置能力表"（截屏、进程、启动程序、锁屏、剪贴板、文件操作） | 让它**自己会找工具**，而不是记住每一条具体命令 |
+| **自动经验**（动态，程序沉淀） | `data/agent-home/experiences.json`：每次任务把「任务 + 当时成功的命令」记一条，相同命令组合只留一条（累加次数），最多 30 条；每次任务注入最近 10 条 | 这个项目里**已经跑通的做法**下次直接照做 |
+
+投入方式：**每次任务都注入**（能力指南约 250 token + 经验约 500 token，固定不涨）。
+每次都是全新会话（`--ephemeral`），**不保留对话上下文**，所以 token 不会随使用次数膨胀。
+
+实测（同一台机器，截屏任务）：
+
+| 方式 | 耗时 | 输入 token | 说明 |
+| --- | --- | --- | --- |
+| 最初（冷启动、无手册） | 71.4s | ~19k | 30 条命令里 28 条在翻源码探索 |
+| 持久会话（已废弃） | 7.5s | 118k | 越用越贵 |
+| 现在（能力指南 + 经验） | **6–8s** | **~31k（98% 缓存）** | 稳定不涨 |
+
 ## 6. 常见操作
 
 | 需求 | 做法 |
