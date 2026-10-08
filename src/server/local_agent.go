@@ -895,6 +895,12 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 					task.add("error", fmt.Sprintf("%s 出错：%s", label, compactJSON(event.Item.Error, 200)))
 				} else {
 					task.add("mcp", fmt.Sprintf("%s 返回 %s", label, compactJSON(event.Item.Result, 300)))
+					// 成功的工具调用也要沉淀：原来只记 shell 命令，结果"用 gui_ 工具两步搞定"的
+					// 任务被记成了"先用 find 满盘找 exe"，下次同类任务照着经验又去翻路径。
+					if !strings.Contains(string(event.Item.Result), "failed") {
+						task.goodCommands = append(task.goodCommands,
+							fmt.Sprintf("%s %s", strings.TrimPrefix(label, "win-gui."), compactJSON(event.Item.Arguments, 200)))
+					}
 				}
 			}
 

@@ -36,7 +36,7 @@ func registerLocalAgentFlags() localAgentFlags {
 		baseURL:  flag.String("agent-base-url", "", "把 agent 的 provider base_url 改写成这个地址，例如 http://127.0.0.1:41780/（本地 shim，可显示思考过程）"),
 		timeout:  flag.Int("agent-timeout", 300, "单次执行超时（秒）"),
 		notify:   flag.Bool("agent-notify", true, "Codex 执行失败时在聊天里发一条提示"),
-		maxSteps: flag.Int("agent-max-steps", 12, "单个任务最多几步（命令 + 工具调用），超限终止；0 = 不限制"),
+		maxSteps: flag.Int("agent-max-steps", 0, "单个任务最多几步（命令 + 工具调用），超限终止；0 = 不限制（默认，靠 -agent-timeout 兜底）"),
 	}
 }
 
