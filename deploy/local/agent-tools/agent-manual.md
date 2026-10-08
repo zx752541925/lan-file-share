@@ -42,7 +42,7 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 | 工具 | 参数 | 用途 |
 | --- | --- | --- |
 | `gui_open` | `path`、`restart?` | 打开程序 / 网址。**进程在跑但窗口看不见（托盘）时用 `restart=true`**，它会（必要时用提权）结束并重启，然后确认窗口真的出现 |
-| `gui_click` | `text`（界面文字）或 `name`（控件名）、`window?`、`dry_run?` | 点击。内部自动处理：找窗口 → 查权限 → 置前 → 控件树 → 找不到就 OCR → 需要时用提权进程点 |
+| `gui_click` | `text`（界面文字）或 `name`（控件名）或 `x`/`y`（坐标）、`window?`、`dry_run?` | 点击。内部自动处理：找窗口 → 查权限 → 置前 → 控件树 → 找不到就 OCR → 需要时用提权进程点；**点完会自动校验**并给出 `verify` 结论 |
 | `gui_type` | `text`、`window?` | 往窗口输入文本 |
 | `gui_read` | — | 读屏：把屏幕 OCR 成文字（**你无法看图片，用这个了解界面**） |
 | `gui_windows` | `process?` | 列出窗口**及状态**：可见 / 最小化 / 隐藏（托盘）。找窗口、判断程序有没有窗口，先用它 |
@@ -52,7 +52,10 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 
 1. 先 `gui_read()`（或 `gui_click(dry_run=true)`）**确认现状**：界面上有什么、目标窗口在不在最前面
 2. 再 `gui_click` 正式点击；输入用 `gui_type`；开程序用 `gui_open`
-3. 看返回的逐步 JSON：`result=success` 就完事；`result=failed` 就看 **`at_step`（卡在哪一步）** 和 **`suggestion`（建议怎么做）**，照建议来
+3. 看返回的逐步 JSON：
+   - `verify` 三档：`changed`（明显变化，多半生效）/ `minor_change`（只有小变化，可能只是选中态，不确定）/ `unchanged`（没变化 → 可能点空了、按钮无响应、或权限不够）
+   - 屏幕上有**多处相同文字**时会给 `text_alternatives`（候选坐标），必要时用 `gui_click(x=…, y=…)` 指定
+   - `result=failed` 就看 **`at_step`（卡在哪一步）** 和 **`suggestion`**，照建议来
 4. 同一个动作**最多试 2 次**；还是不行就停下来，把 `gui_shot` 的截图发给人并说明卡在哪 —— 不要连试几十次
 
 **禁止事项**：
