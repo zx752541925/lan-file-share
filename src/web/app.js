@@ -30,6 +30,7 @@ const el = {
   qrState: document.getElementById('qrState'),
   qrRotate: document.getElementById('qrRotate'),
   qrCopy: document.getElementById('qrCopy'),
+  qrAdvanced: document.getElementById('qrAdvanced'),
   sessionModal: document.getElementById('sessionModal'),
   sessionList: document.getElementById('sessionList'),
   linkBtn: document.getElementById('linkBtn'),
@@ -40,6 +41,7 @@ const el = {
   hostQrBox: document.getElementById('hostQrBox'),
   inviteNote: document.getElementById('inviteNote'),
   inviteCreate: document.getElementById('inviteCreate'),
+  inviteAdvanced: document.getElementById('inviteAdvanced'),
   inviteList: document.getElementById('inviteList'),
   deviceList: document.getElementById('deviceList'),
   confirmModal: document.getElementById('confirmModal'),
@@ -701,7 +703,7 @@ async function newQrInvite() {
   const invite = await apiJSON(api('/api/invites'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ note: '扫码加入' }),
+    body: JSON.stringify({ note: '扫码加入', advanced: Boolean(el.qrAdvanced?.checked) }),
   });
   renderQrInvite(invite);
 }
@@ -946,12 +948,14 @@ function renderInvites() {
         ? `使用于 ${formatStamp(invite.usedAt)}`
         : `创建于 ${formatStamp(invite.createdAt)} · ${formatStamp(invite.expiresAt)} 过期`;
       const activity = invite.lastSeen ? ` · 最近活动 ${formatStamp(invite.lastSeen)}` : '';
+      const advanced = invite.advanced ? '<em class="invite-advanced">高级</em>' : '';
 
       return `<li class="invite-item">
           <span class="invite-main">
             <span class="invite-title">
               ${esc(invite.note || '未备注')}
               <em class="invite-status ${inviteStatusClass(invite.status)}">${esc(invite.status)}</em>
+              ${advanced}
             </span>
             <span class="invite-sub">${time}${activity}</span>
           </span>
@@ -972,11 +976,12 @@ function renderDevices() {
     .map((device) => {
       const title = device.name || (device.role === 'host' ? '主机' : '访客');
       const note = device.note ? ` · ${esc(device.note)}` : '';
+      const advanced = device.advanced ? ' <em class="invite-advanced">高级</em>' : '';
       const last = device.lastSeen ? `最近活动 ${formatStamp(device.lastSeen)}` : '—';
 
       return `<li class="device-item">
           <span class="device-main">
-            <span class="device-title">${esc(title)}${note}</span>
+            <span class="device-title">${esc(title)}${note}${advanced}</span>
             <span class="device-sub">${esc(device.ip || '')}${device.ua ? ` · ${esc(shortUA(device.ua))}` : ''}</span>
             <span class="device-sub">${last}</span>
           </span>
@@ -1032,7 +1037,10 @@ el.inviteCreate.addEventListener('click', async () => {
     const invite = await apiJSON(api('/api/invites'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ note: el.inviteNote.value.trim() }),
+      body: JSON.stringify({
+        note: el.inviteNote.value.trim(),
+        advanced: Boolean(el.inviteAdvanced?.checked),
+      }),
     });
     el.inviteNote.value = '';
     await loadInvites();

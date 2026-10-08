@@ -31,6 +31,7 @@ type App struct {
 	port      string
 	publicURL string
 	base      string // 访问子路径，形如 / 或 /lanfile/（前后都有斜杠）
+	agent     *Agent // 聊天室里的 Codex，未开启时为 nil
 }
 
 func main() {
@@ -45,6 +46,13 @@ func main() {
 	hostCookieDays := flag.Int("host-cookie-days", 30, "主机登录有效期（天，每次上线滑动续期）")
 	guestCookieDays := flag.Int("guest-cookie-days", 7, "访客登录有效期（天，每次上线滑动续期）")
 	inviteTTLHours := flag.Int("invite-ttl-hours", 24, "邀请链接未被使用时的有效期（小时）")
+	agentOn := flag.Bool("agent", false, "开启聊天室里的 Codex 成员（需要本机能调 codex CLI）")
+	agentTrigger := flag.String("agent-trigger", "@codex", "触发词，消息里出现它才回复（不分大小写）")
+	agentName := flag.String("agent-name", "Codex", "聊天里显示的昵称")
+	agentCwd := flag.String("agent-cwd", "sessions", "Codex 的工作目录；相对路径按数据目录解析（默认 data/sessions）")
+	agentHome := flag.String("agent-home", "", "给 Codex 用的独立 CODEX_HOME（自带免确认的 AGENTS.md）；留空则用 <数据目录>/agent-home")
+	agentTimeout := flag.Int("agent-timeout", 300, "单次执行超时（秒）")
+	agentNotify := flag.Bool("agent-notify", true, "Codex 执行失败时在聊天里发一条提示")
 	openBrowser := flag.Bool("open", true, "启动后自动打开浏览器")
 	flag.Parse()
 
@@ -82,6 +90,11 @@ func main() {
 		base:      normalizeBase(*base),
 	}
 	go app.hub.Run()
+
+	if *agentOn {
+		app.agent = newAgent(*agentName, *agentTrigger, *agentCwd,
+			*agentHome, time.Duration(*agentTimeout)*time.Second, *dataDir, *agentNotify)
+	}
 
 	chunks := newChunkedUploads(filepath.Join(*dataDir, "tmp"), app)
 

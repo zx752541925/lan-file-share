@@ -61,6 +61,7 @@ type Identity struct {
 	Role     Role   // 主机 / 访客
 	InviteID string // 访客来源邀请码 ID（主机为空）
 	PassID   string // 访客凭证 ID：用于设备识别与「撤销邀请后立即失效」
+	Advanced bool   // 高级权限：主机恒为 true；访客取决于邀请码上有没有勾选
 	IP       string // 来源 IP（经 nginx 时取 X-Forwarded-For 的第一段）
 	UA       string // User-Agent，仅作展示
 }
@@ -70,6 +71,9 @@ func (i Identity) Valid() bool { return i.Role == RoleHost || i.Role == RoleGues
 
 // IsHost 表示是否主机。
 func (i Identity) IsHost() bool { return i.Role == RoleHost }
+
+// CanUseAgent 表示是否有权触发聊天室里的 Codex（主机或高级邀请用户）。
+func (i Identity) CanUseAgent() bool { return i.Role == RoleHost || i.Advanced }
 
 // DeviceKey 是身份对应的设备标识：主机固定为 "host"，访客用凭证 ID。
 func (i Identity) DeviceKey() string {
@@ -83,6 +87,7 @@ func (i Identity) DeviceKey() string {
 type Invite struct {
 	ID        string `json:"id"`        // 邀请码，同时是链接里的 code
 	Note      string `json:"note"`      // 备注：发给谁
+	Advanced  bool   `json:"advanced"`  // 勾选后对方可触发 Codex（等同于"高级权限"）
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt"` // 未被使用时的失效时间
 	UsedAt    int64  `json:"usedAt,omitempty"`
@@ -99,6 +104,7 @@ type Invite struct {
 type SeenDevice struct {
 	Key      string `json:"key"`
 	Role     Role   `json:"role"`
+	Advanced bool   `json:"advanced,omitempty"`
 	Name     string `json:"name,omitempty"` // 前端 hello 上报的昵称
 	InviteID string `json:"inviteId,omitempty"`
 	Note     string `json:"note,omitempty"`
@@ -186,7 +192,8 @@ func (a *Auth) RedeemHostKey(key string) bool {
 /* ---------------- 邀请码 ---------------- */
 
 // CreateInvite 生成一张一次性邀请链接（A 方案：谁先点谁绑定，转发无效）。
-func (a *Auth) CreateInvite(note string) Invite {
+// advanced 为 true 表示这张邀请码带「高级权限」（可触发 Codex）。
+func (a *Auth) CreateInvite(note string, advanced bool) Invite {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cleanupLocked()
@@ -195,6 +202,7 @@ func (a *Auth) CreateInvite(note string) Invite {
 	invite := &Invite{
 		ID:        randomToken(hostKeyLen),
 		Note:      cleanName(note),
+		Advanced:  advanced,
 		CreatedAt: now.UnixMilli(),
 		ExpiresAt: now.Add(a.inviteTTL).UnixMilli(),
 		Status:    statusPending,
@@ -272,7 +280,10 @@ func (a *Auth) RedeemInvite(code, ip, ua string) (Identity, string) {
 	invite.LastSeen = invite.UsedAt
 	invite.Status = statusUsed
 
-	return Identity{Role: RoleGuest, InviteID: invite.ID, PassID: invite.passID, IP: ip, UA: ua}, ""
+	return Identity{
+		Role: RoleGuest, InviteID: invite.ID, PassID: invite.passID,
+		Advanced: invite.Advanced, IP: ip, UA: ua,
+	}, ""
 }
 
 /* ---------------- 身份判定与 cookie ---------------- */
@@ -298,7 +309,10 @@ func (a *Auth) IdentityOf(w http.ResponseWriter, r *http.Request) Identity {
 	if payload, ok := a.readCookie(r, cookieGuest); ok {
 		if now.Sub(time.UnixMilli(payload.issuedAt)) <= a.guestTTL {
 			if invite := a.inviteFor(payload.inviteID, payload.passID); invite != nil {
-				id := Identity{Role: RoleGuest, InviteID: invite.ID, PassID: payload.passID, IP: ip, UA: ua}
+				id := Identity{
+					Role: RoleGuest, InviteID: invite.ID, PassID: payload.passID,
+					Advanced: invite.Advanced, IP: ip, UA: ua,
+				}
 				a.touch(id)
 				if w != nil && now.Sub(time.UnixMilli(payload.issuedAt)) > renewAfter {
 					a.setCookie(w, r, cookieGuest, a.guestTTL, cookiePayload{
@@ -435,7 +449,7 @@ func (a *Auth) touch(id Identity) {
 	now := time.Now().UnixMilli()
 	entry, ok := a.seen[key]
 	if !ok {
-		entry = &SeenDevice{Key: key, Role: id.Role, FirstAt: now}
+		entry = &SeenDevice{Key: key, Role: id.Role, Advanced: id.Advanced, FirstAt: now}
 		a.seen[key] = entry
 		// 访客记录跟着邀请码的状态走
 		if invite := a.invites[id.InviteID]; invite != nil {
@@ -445,6 +459,7 @@ func (a *Auth) touch(id Identity) {
 		}
 	}
 	entry.Role = id.Role
+	entry.Advanced = id.Advanced
 	entry.IP = id.IP
 	entry.UA = id.UA
 	entry.LastAt = now

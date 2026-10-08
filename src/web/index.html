@@ -116,6 +116,10 @@
         <h3>扫码加入</h3>
         <button type="button" class="modal-close" data-close aria-label="关闭">×</button>
       </div>
+      <label class="check-row">
+        <input type="checkbox" id="qrAdvanced" />
+        <span>允许对方使用 Codex（高级权限）</span>
+      </label>
       <div class="qr-box" id="qrBox"></div>
       <p class="qr-url" id="qrUrl"></p>
       <p class="qr-state" id="qrState"></p>
@@ -187,6 +191,10 @@
           <input class="link-input" id="inviteNote" placeholder="备注，例如「张三」" maxlength="16" />
           <button type="button" class="btn-primary" id="inviteCreate">生成邀请</button>
         </div>
+        <label class="check-row">
+          <input type="checkbox" id="inviteAdvanced" />
+          <span>高级权限：对方可触发聊天室里的 Codex</span>
+        </label>
         <p class="modal-tip">谁先打开就绑定谁，链接转发给别人打不开；撤销后对方立刻被挡在门外。</p>
         <ul class="invite-list" id="inviteList"></ul>
       </section>

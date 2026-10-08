@@ -258,6 +258,37 @@ func (m *Manager) AddMessage(message Message) {
 	m.persistLocked(session)
 }
 
+// AddMessageTo 把消息追加到指定会话。
+// 给 agent 用：它在后台跑几十秒，期间主机可能切走了会话，
+// 回复必须落回「触发它的那个会话」，不能跟着 m.current 走。
+func (m *Manager) AddMessageTo(sessionID string, message Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, ok := m.index[sessionID]
+	if !ok {
+		return fmt.Errorf("会话不存在：%s", sessionID)
+	}
+
+	session.Messages = append(session.Messages, message)
+	if len(session.Messages) > maxStoredMessages {
+		session.Messages = session.Messages[len(session.Messages)-maxStoredMessages:]
+	}
+	if message.TS > session.UpdatedAt {
+		session.UpdatedAt = message.TS
+	}
+	return m.persistLocked(session)
+}
+
+// ByID 按会话 ID 取会话（agent 需要读它触发时的历史）。
+func (m *Manager) ByID(sessionID string) (*Session, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, ok := m.index[sessionID]
+	return session, ok
+}
+
 func (m *Manager) AddFile(file FileMeta) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

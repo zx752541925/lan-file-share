@@ -63,6 +63,7 @@ func (a *App) handleWS(w http.ResponseWriter, r *http.Request) {
 		host:        identity.IsHost(),
 		deviceKey:   identity.DeviceKey(),
 		inviteID:    identity.InviteID,
+		advanced:    identity.CanUseAgent(),
 		ip:          identity.IP,
 		ua:          identity.UA,
 		connectedAt: time.Now().UnixMilli(),
@@ -219,6 +220,12 @@ func (a *App) handleChat(client *Client, incoming Incoming) {
 
 	a.sessions.AddMessage(message)
 	a.broadcast(Event{Type: "message", Message: &message})
+
+	// 聊天室里的 Codex：只有主机和「高级邀请」用户能触发；判断与排队在 Agent 内部完成，
+	// 这里立刻返回，不会卡住这条 WebSocket 的读循环。
+	if a.agent != nil && (client.host || client.advanced) {
+		a.agent.Handle(a, session.ID, message)
+	}
 }
 
 func (a *App) handleSwitch(incoming Incoming) {
@@ -414,12 +421,17 @@ func (a *App) handleInvites(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var body struct {
-			Note string `json:"note"`
+			Note     string `json:"note"`
+			Advanced bool   `json:"advanced"`
 		}
 		_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body)
 
-		invite := a.auth.CreateInvite(body.Note)
-		log.Printf("主机生成邀请链接「%s」", invite.Note)
+		invite := a.auth.CreateInvite(body.Note, body.Advanced)
+		if invite.Advanced {
+			log.Printf("主机生成邀请链接「%s」（高级权限：可触发 Codex）", invite.Note)
+		} else {
+			log.Printf("主机生成邀请链接「%s」", invite.Note)
+		}
 		writeJSON(w, http.StatusOK, inviteView(invite, a.siteURL(a.baseURLFor(r))))
 
 	default:
@@ -463,6 +475,7 @@ func (a *App) handleDevices(w http.ResponseWriter, r *http.Request) {
 	for _, seen := range a.auth.Devices() {
 		entry := map[string]any{
 			"key": seen.Key, "role": string(seen.Role), "name": seen.Name,
+			"advanced": seen.Advanced,
 			"inviteId": seen.InviteID, "note": seen.Note, "ip": seen.IP, "ua": seen.UA,
 			"firstSeen": seen.FirstAt, "lastSeen": seen.LastAt, "online": false,
 		}
@@ -480,6 +493,7 @@ func (a *App) handleDevices(w http.ResponseWriter, r *http.Request) {
 	for _, client := range online {
 		devices = append(devices, map[string]any{
 			"key": client.Key, "role": roleName(client.Host), "name": client.Name,
+			"advanced": client.Advanced,
 			"ip": client.IP, "ua": client.UA, "online": true, "connectedAt": client.ConnectedAt,
 		})
 	}
@@ -502,6 +516,7 @@ func inviteView(invite Invite, base string) map[string]any {
 	return map[string]any{
 		"id":        invite.ID,
 		"note":      invite.Note,
+		"advanced":  invite.Advanced,
 		"status":    invite.Status,
 		"createdAt": invite.CreatedAt,
 		"expiresAt": invite.ExpiresAt,
