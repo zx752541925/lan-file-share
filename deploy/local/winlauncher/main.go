@@ -20,7 +20,9 @@ package main
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -87,15 +89,14 @@ func run() error {
 
 	url := fmt.Sprintf("http://%s:%s/?host=%s", ip, listenPort, key)
 
-	// 6) 弹窗 + 复制到剪贴板
+	// 6) 静默完成：地址复制到剪贴板 + 写一行日志，不再弹窗打断
 	copyToClipboard(url)
-	messageBox("lanfile 已启动",
-		fmt.Sprintf("主机局域网 IP：%s\n\n主机地址（已复制到剪贴板）：\n%s\n\n手机请连同一 Wi-Fi，用这个 IP 访问。",
-			ip, url),
-		mbOK|mbIconInformation)
+	appendLog(fmt.Sprintf("已启动：%s（本机 IP %s）", url, ip))
 
 	// 7) 打开浏览器
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	if err := exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start(); err != nil {
+		return fmt.Errorf("打开浏览器失败：%v\n主机地址（已复制到剪贴板）：%s", err, url)
+	}
 	return nil
 }
 
@@ -185,9 +186,8 @@ func lanIP() string {
 /* ---------------- Windows 小工具（消息框 / 剪贴板） ---------------- */
 
 const (
-	mbOK              = 0x00000000
-	mbIconError       = 0x00000010
-	mbIconInformation = 0x00000040
+	mbOK        = 0x00000000
+	mbIconError = 0x00000010
 )
 
 var (
@@ -208,4 +208,19 @@ func messageBox(title, text string, flags uintptr) {
 func copyToClipboard(text string) {
 	script := fmt.Sprintf("Set-Clipboard -Value '%s'", strings.ReplaceAll(text, "'", "''"))
 	_ = exec.Command("powershell.exe", "-NoProfile", "-Command", script).Run()
+}
+
+// appendLog 在用户主目录追加一行启动记录（没有弹窗，但出问题时有据可查）。
+func appendLog(line string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	file, err := os.OpenFile(filepath.Join(home, "lanfile-start.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	_, _ = file.WriteString(time.Now().Format("2006-01-02 15:04:05 ") + line + "\r\n")
 }
