@@ -56,6 +56,7 @@ func main() {
 	agentName := flag.String("agent-name", "Codex", "聊天里显示的昵称")
 	agentCwd := flag.String("agent-cwd", "sessions", "Codex 的工作目录；相对路径按数据目录解析（默认 data/sessions）")
 	agentHome := flag.String("agent-home", "", "给 Codex 用的独立 CODEX_HOME（自带免确认的 AGENTS.md）；留空则用 <数据目录>/agent-home")
+	agentBaseURL := flag.String("agent-base-url", "", "把 agent 的 provider base_url 改写成这个地址，例如 http://127.0.0.1:41780/（本地 shim，可显示思考过程）")
 	agentTimeout := flag.Int("agent-timeout", 300, "单次执行超时（秒）")
 	agentNotify := flag.Bool("agent-notify", true, "Codex 执行失败时在聊天里发一条提示")
 	openBrowser := flag.Bool("open", true, "启动后自动打开浏览器")
@@ -98,7 +99,7 @@ func main() {
 
 	if *agentOn {
 		app.agent = newAgent(*agentName, *agentTrigger, *agentCwd,
-			*agentHome, time.Duration(*agentTimeout)*time.Second, *dataDir, *agentNotify)
+			*agentHome, *agentBaseURL, time.Duration(*agentTimeout)*time.Second, *dataDir, *agentNotify)
 		app.agentTrigger = *agentTrigger
 		app.agentCwd = *agentCwd
 		app.agentTimeout = time.Duration(*agentTimeout) * time.Second

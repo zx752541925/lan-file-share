@@ -50,12 +50,18 @@ func run() error {
 		return fmt.Errorf("唤醒 WSL 失败：%v\n%s", err, out)
 	}
 
-	// 2) 重启服务（没在跑就是启动），拿到一张没用过的主机链接
+	// 2) 先确保推理摘要中转（shim）在跑 —— agent 的 provider 指向它，缺了它 Codex 会连不上
+	//    仅当装了该服务时才存在，失败不影响后续
+	if _, err := wsl("-e", "systemctl", "--user", "start", "deepseek-shim"); err != nil {
+		_ = err // 没装 shim 就跳过
+	}
+
+	// 3) 重启服务（没在跑就是启动），拿到一张没用过的主机链接
 	if out, err := wsl("-e", "systemctl", "--user", "restart", serviceName); err != nil {
 		return fmt.Errorf("启动 lanfile 服务失败：%v\n%s", err, out)
 	}
 
-	// 3) 等服务把链接打印进日志（最多等 15 秒）
+	// 4) 等服务把链接打印进日志（最多等 15 秒）
 	key := ""
 	for i := 0; i < 15; i++ {
 		out, err := wsl("-e", "bash", "-lc",
@@ -73,7 +79,7 @@ func run() error {
 			distroName, wslUser, serviceName)
 	}
 
-	// 4) 取本机局域网 IP
+	// 5) 取本机局域网 IP
 	ip := lanIP()
 	if ip == "" {
 		return fmt.Errorf("找不到可用的局域网 IP（网卡都断开了？）")
@@ -81,14 +87,14 @@ func run() error {
 
 	url := fmt.Sprintf("http://%s:%s/?host=%s", ip, listenPort, key)
 
-	// 5) 弹窗 + 复制到剪贴板
+	// 6) 弹窗 + 复制到剪贴板
 	copyToClipboard(url)
 	messageBox("lanfile 已启动",
 		fmt.Sprintf("主机局域网 IP：%s\n\n主机地址（已复制到剪贴板）：\n%s\n\n手机请连同一 Wi-Fi，用这个 IP 访问。",
 			ip, url),
 		mbOK|mbIconInformation)
 
-	// 6) 打开浏览器
+	// 7) 打开浏览器
 	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 	return nil
 }

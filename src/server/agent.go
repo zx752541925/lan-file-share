@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -106,6 +107,7 @@ type Agent struct {
 	bin     string        // codex 可执行文件的绝对路径
 	notify  bool          // 失败时是否在聊天里发一条提示
 	home    string        // 独立的 CODEX_HOME：自带一份 config.toml 和 AGENTS.md
+	baseURL string        // 可选：把 provider 的 base_url 改写成它（例如指向本地 shim）
 
 	jobs chan agentJob
 
@@ -139,7 +141,7 @@ const agentHomeAGENTS = `# 聊天室成员 Codex
 
 // newAgent 准备 agent：解析 codex 路径、确定工作目录并启动串行执行协程。
 // 找不到 codex 时返回 nil（调用方据此关闭功能），不会让服务起不来。
-func newAgent(name, trigger, cwd, homeDir string, timeout time.Duration, dataDir string, notify bool) *Agent {
+func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration, dataDir string, notify bool) *Agent {
 	bin, err := exec.LookPath(agentCodexBinary)
 	if err != nil {
 		log.Printf("agent：找不到 codex 可执行文件（%v），聊天室 Codex 功能已关闭", err)
@@ -184,6 +186,7 @@ func newAgent(name, trigger, cwd, homeDir string, timeout time.Duration, dataDir
 		bin:     bin,
 		notify:  notify,
 		home:    homeDir,
+		baseURL: strings.TrimSpace(baseURL),
 		jobs:    make(chan agentJob, agentQueueSize),
 		seen:    make(map[string]bool),
 	}
@@ -192,8 +195,14 @@ func newAgent(name, trigger, cwd, homeDir string, timeout time.Duration, dataDir
 
 	log.Printf("agent：聊天室 Codex 已启用，触发词 %q，工作目录 %s，CODEX_HOME %s，单次超时 %s",
 		trigger, cwd, homeDir, timeout)
+	if agent.baseURL != "" {
+		log.Printf("agent：provider base_url 将被改写为 %s（思考过程会经它中转）", agent.baseURL)
+	}
 	return agent
 }
+
+// baseURLPattern 匹配 provider 配置里的 base_url 行，用于改写。
+var baseURLPattern = regexp.MustCompile(`(?m)^(\s*base_url\s*=\s*)"[^"]*"`)
 
 // syncConfig 把 ~/.codex/config.toml 同步到自己的 CODEX_HOME。
 // 源文件更新过（比如换了模型或密钥）就重新复制，保证 agent 用的配置跟你本机一致。
@@ -210,14 +219,25 @@ func (a *Agent) syncConfig() {
 		log.Printf("agent：读不到 %s（%v），Codex 可能因为没有 provider 配置而失败", src, err)
 		return
 	}
-	if dstInfo, err := os.Stat(dst); err == nil && !srcInfo.ModTime().After(dstInfo.ModTime()) {
-		return
+	// 指定了 base-url 时不能走"目标较新就跳过"的优化：之前复制过去的文件里
+	// 还是原始地址，必须重新生成一次。（也可以靠 gzip 哈希判断，但不值得）
+	if a.baseURL == "" {
+		if dstInfo, err := os.Stat(dst); err == nil && !srcInfo.ModTime().After(dstInfo.ModTime()) {
+			return
+		}
 	}
 
 	raw, err := os.ReadFile(src)
 	if err != nil {
 		log.Printf("agent：读取 %s 失败：%v", src, err)
 		return
+	}
+	// 需要的话，把 provider 的 base_url 换成本地 shim（不改动你本机 ~/.codex 的原文件）
+	if a.baseURL != "" {
+		raw = baseURLPattern.ReplaceAllFunc(raw, func(match []byte) []byte {
+			sub := baseURLPattern.FindSubmatch(match)
+			return append(append([]byte{}, sub[1]...), []byte(`"`+a.baseURL+`"`)...)
+		})
 	}
 	if err := os.WriteFile(dst, raw, 0o600); err != nil {
 		log.Printf("agent：写入 %s 失败：%v", dst, err)

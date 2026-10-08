@@ -201,6 +201,7 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | `-agent-name` | `Codex` | 聊天里显示的昵称 |
 | `-agent-cwd` | `sessions` | 工作目录；相对路径按数据目录解析，默认 `data/sessions` |
 | `-agent-home` | 空 | 给 Codex 用的独立 `CODEX_HOME`（自带免确认的 `AGENTS.md`），默认 `<数据目录>/agent-home` |
+| `-agent-base-url` | 空 | 把 agent 的 provider `base_url` 改写成这个地址（例如 `http://127.0.0.1:41780/`，配合本地 `deepseek-shim` 就能在控制台看到「思考」行） |
 | `-agent-timeout` | `300` | 单次执行超时（秒），超时按进程组整棵杀掉 |
 | `-agent-notify` | `true` | 执行失败时在聊天里发一条提示（否则只记日志） |
 
@@ -221,6 +222,16 @@ Codex: 目录下有 2026-10-08_19-42-52/ 一个会话目录，里面是空的。
 - **串行**：一次只跑一个，队列上限 3，满了直接丢弃并记日志；任何情况都不会阻塞聊天（调用方立即返回）
 - **超时**：默认 300 秒，超时连子进程一起按进程组杀掉，避免留下孤儿继续改文件
 - **配置隔离**：agent 用独立的 `CODEX_HOME`（默认 `<数据目录>/agent-home`），里面有自己的一份 `AGENTS.md`（明确"直接执行、不要请求确认"）和一份从 `~/.codex/config.toml` 同步来的配置。**不这样做的话，嵌套的 codex 会读到你 `~/.codex/AGENTS.md` 里的"动手前先确认"规则而拒绝干活**
+- **看得到思考过程**：DeepSeek 的 responses 接口其实会返回思考原文（`content[].reasoning_text`），但 `summary` 是空数组，而 Codex 只渲染 `summary` 通道，所以直连时看不到。配上 `-agent-base-url http://127.0.0.1:41780/`（指向本地 `deepseek-shim`）后，shim 会把原文转成 Codex 认的摘要，控制台里就会出现紫色的「思考」行
+
+### Codex 控制台（`/agent`，仅主机）
+
+主机顶栏「控制台」按钮会在新页签打开 `<base>/agent`：
+
+- 左侧任务列表：排队中 / 执行中 / 已完成 / 失败 / 已终止，附触发人、耗时、token 用量
+- 右侧实时输出：`命令`（执行的 shell 命令）、`输出`（命令结果）、`回复`（最终回复）、`思考`（配 shim 才有）、`错误`
+- 「终止这个任务」按钮：按进程组 `SIGKILL`，连同它拉起的子进程一起杀
+- 页面与接口都只有主机可访问（访客会被 302 送回聊天页）
 
 风险提示：
 
