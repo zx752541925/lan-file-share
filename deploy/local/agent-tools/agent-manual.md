@@ -35,58 +35,34 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 **规则：先查（`Get-Command` / `where.exe`）、查到就用最直白的那条命令。**
 失败时换一条**明确**的写法（用 `Get-Help` 查清楚再写），不要连续试五种写法。
 
-## 2. 操作界面：先控件树，再 OCR，最后才坐标
+## 2. 操作界面：用 gui_* 工具，不要自己写 PowerShell
 
-**Windows 界面上要点击/输入任何东西，都按这个顺序做，不要上来就猜坐标：**
+你有 5 个现成的 GUI 工具（MCP 工具，直接调用）：
 
-```bash
-PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
-GUI="$(wslpath -w ~/.codex/win-gui-tools)"      # 公共 GUI 工具包
+| 工具 | 参数 | 用途 |
+| --- | --- | --- |
+| `gui_open` | `path` | 打开程序 / 网址 |
+| `gui_click` | `text`（界面文字）或 `name`（控件名）、`window?`、`dry_run?` | 点击。内部自动处理：找窗口 → 查权限 → 置前 → 控件树 → 找不到就 OCR → 需要时用提权进程点 |
+| `gui_type` | `text`、`window?` | 往窗口输入文本 |
+| `gui_read` | — | 读屏：把屏幕 OCR 成文字（**你无法看图片，用这个了解界面**） |
+| `gui_shot` | `save_to?` | 截图，返回文件路径（要发给人看就交给发文件工具） |
 
-# ① 有哪些窗口？
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\list-windows.ps1"
+**标准流程**（照这个顺序，不要跳步）：
 
-# ② 目标窗口里有哪些控件？（按钮的名字、AutomationId、坐标都在这）
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\dump-controls.ps1" -Window WeGame -Depth 4
+1. 先 `gui_read()`（或 `gui_click(dry_run=true)`）**确认现状**：界面上有什么、目标窗口在不在最前面
+2. 再 `gui_click` 正式点击；输入用 `gui_type`；开程序用 `gui_open`
+3. 看返回的逐步 JSON：`result=success` 就完事；`result=failed` 就看 **`at_step`（卡在哪一步）** 和 **`suggestion`（建议怎么做）**，照建议来
+4. 同一个动作**最多试 2 次**；还是不行就停下来，把 `gui_shot` 的截图发给人并说明卡在哪 —— 不要连试几十次
 
-# ③ 按名字点击（先 DryRun 确认要点哪个，再真点）
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\click-control.ps1" -Window WeGame -Name "登录" -DryRun
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\click-control.ps1" -Window WeGame -Name "登录"
+**禁止事项**：
 
-# ④ 控件树里没有按钮（CEF/游戏/自绘界面，例如 WeGame 只暴露一个 Chrome Legacy Window）
-#    改用 OCR 找文字，再点它的坐标：
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\find-text.ps1" -Text "登录"
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\click-text.ps1" -Text "登录" -Activate WeGame -DryRun
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\click-text.ps1" -Text "登录" -Activate WeGame
+- **不要**用 shell 手写 PowerShell / 内联 C# 去点界面（那是没有工具时的老办法，慢且容易走偏）
+- **不要**去读 `~/.codex/win-gui-tools/` 里的脚本源码（那是给人看的，不是给你读的）
+- **不要**盲目猜坐标点击；坐标应该来自 `gui_read` 的输出
 
-# ⑤ 实在找不到：截图发给人看，问清楚再动，不要连试几十次
-```
-
-截图（DPI 感知、整屏）：
-
-```bash
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\screenshot.ps1" -Out 'C:\Users\Public\shot.png'
-```
-
-输入文本：`type-text.ps1 -Window WeGame -Text "hello"`；坐标兜底：`click-point.ps1 -X 640 -Y 480`。
-
-**这些工具的用法细节看 `~/.codex/win-gui-tools/README.md`。**
-
-三条重要提醒（都是实测踩出来的）：
-
-- **你（模型）看不了图片**：`view_image` 之类不可用。要"看"界面就用
-  `find-text.ps1 -All`（把整屏 OCR 成文字）或 `find-text.ps1 -Text "关键词"`。
-- **目标窗口被别的窗口挡住时**，OCR 读到的会是压在上面的那个窗口。先置前：
-  `click-text.ps1 -Text "..." -Activate <窗口名>`，或先把遮挡的窗口最小化。
-  工具找不到文字时会自动把"当前屏幕识别到的文字"列出来，据此判断是谁在最前面。
-  置前结果工具会**如实报告**（校验过前后台窗口），报告失败就别硬点。
-- **点不动 ≠ 坐标错，先查权限**：如果坐标确认没错（`dump-controls` 或 OCR 给的），
-  但点击毫无反应，多半是对方**以管理员运行**，普通进程的鼠标注入被 Windows 拦掉（UIPI）。
-  `dump-controls.ps1` 现在会打印目标进程权限；是"管理员"就改用：
-  ```bash
-  "$PS" -NoProfile -ExecutionPolicy Bypass -File "$GUI\\click-elevated.ps1" -Text "登录" -Activate WeGame
-  ```
-  它会用提权子进程去点（本机 UAC 策略是"不提示直接提升"，不会弹窗）。
+> 底层实现：`win-gui-tools/gui.ps1` 是一条确定性流水线，`win-gui-mcp` 把它暴露成上面的工具。
+> 如果你的工具列表里没有 `gui_*`（说明 MCP 没加载），再用 shell 调用
+> `powershell.exe -File ~/.codex/win-gui-tools/gui.ps1 -Action ... -Json` 作为兜底。
 
 ## 2.1 其他常用内置能力（先按第 1 节查，再用）
 
