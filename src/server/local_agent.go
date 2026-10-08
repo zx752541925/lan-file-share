@@ -722,6 +722,16 @@ func (a *Agent) exec(task *agentTask, prompt string) (string, *AgentUsage, error
 	cmd.Env = append(env, "CODEX_HOME="+a.home)
 	// 单独进程组：超时或手动终止时，连同 codex 拉起的子进程一起杀，避免留下孤儿继续改文件
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// 超时到了要按进程组杀：只杀直接子进程的话，codex 拉起的 bash/powershell 会继续占着
+	// 输出管道，读取循环永远不返回，任务就卡在"执行中"（这个坑踩过一次）
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// 进程组被杀后，如果还有子孙进程占着管道，最多再等 5 秒就放弃等待
+	cmd.WaitDelay = 5 * time.Second
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
