@@ -70,6 +70,19 @@
     .line.error .text { color: #ff9d9d; }
     .line.note .text { color: #f0c674; }
     .line.reasoning .text { color: #c9a6ff; }
+    /* 命令与输出默认折叠：summary 显示一行预览，展开才看全文 */
+    details.line { display: block; }
+    details.line > summary {
+      display: flex; gap: 10px; cursor: pointer; list-style: none;
+    }
+    details.line > summary::-webkit-details-marker { display: none; }
+    details.line > summary::before {
+      content: "▸"; flex: none; width: 12px; color: #5a6373; transition: transform .12s;
+    }
+    details.line[open] > summary::before { transform: rotate(90deg); }
+    details.line > summary .text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    details.line[open] > summary .text { display: none; }
+    details.line > .body { padding-left: 80px; }
     .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
     footer { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
   </style>
@@ -88,6 +101,7 @@
     <section class="detail">
       <div class="detail-head">
         <span class="title" id="detailTitle">选择左侧的任务查看过程</span>
+        <button type="button" id="foldBtn">全部展开</button>
         <button type="button" class="danger" id="killBtn" disabled>终止这个任务</button>
       </div>
       <pre class="stream" id="stream"></pre>
@@ -107,6 +121,7 @@
       summary: document.getElementById('summary'),
       list: document.getElementById('taskList'),
       title: document.getElementById('detailTitle'),
+      fold: document.getElementById('foldBtn'),
       kill: document.getElementById('killBtn'),
       stream: document.getElementById('stream'),
       footer: document.getElementById('footer'),
@@ -115,6 +130,10 @@
     let selected = '';
     let tasks = [];
     let stopped = false;
+    let expandAll = false;            // 「全部展开」按钮：控制折叠项默认是否打开
+    const opened = new Set();         // 用户手动展开过的行（刷新后保持）
+
+    const foldable = (kind) => kind === 'command' || kind === 'output';
 
     const fmtTime = (ms) => (ms ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '—');
     const fmtDuration = (task) => {
@@ -160,10 +179,27 @@
       el.title.textContent = `${current.prompt || '(空消息)'} · ${statusText(current.status)} · ${fmtDuration(current)}`;
       el.kill.disabled = !(current.status === 'running' || current.status === 'queued');
       el.stream.innerHTML = current.lines?.length
-        ? current.lines.map((line) => `<div class="line ${line.kind}">
-             <span class="kind">${kindText(line.kind)}</span>
-             <span class="text">${escapeHtml(line.text)}</span>
-           </div>`).join('')
+        ? current.lines
+            .map((line, index) => {
+              const key = `${current.id}:${index}`;
+              const body = escapeHtml(line.text);
+              const preview = escapeHtml(line.text.split('\n')[0].slice(0, 120));
+              if (!foldable(line.kind)) {
+                return `<div class="line ${line.kind}">
+                    <span class="kind">${kindText(line.kind)}</span>
+                    <span class="text">${body}</span>
+                  </div>`;
+              }
+              const open = expandAll || opened.has(key) ? ' open' : '';
+              return `<details class="line ${line.kind}" data-key="${key}"${open}>
+                  <summary>
+                    <span class="kind">${kindText(line.kind)}</span>
+                    <span class="text">${preview}</span>
+                  </summary>
+                  <div class="body text">${body}</div>
+                </details>`;
+            })
+            .join('')
         : '<div class="empty">这个任务还没有输出</div>';
 
       if (current.status === 'running' || current.status === 'queued') {
@@ -206,6 +242,24 @@
       const item = event.target.closest('.task');
       if (!item) return;
       selected = item.dataset.id;
+      render();
+    });
+
+    // 折叠状态：toggle 不冒泡，用捕获阶段记录用户展开过哪些行（刷新时保持）
+    el.stream.addEventListener(
+      'toggle',
+      (event) => {
+        const node = event.target;
+        if (!node.dataset?.key) return;
+        if (node.open) opened.add(node.dataset.key);
+        else opened.delete(node.dataset.key);
+      },
+      true
+    );
+
+    el.fold.addEventListener('click', () => {
+      expandAll = !expandAll;
+      el.fold.textContent = expandAll ? '全部折叠' : '全部展开';
       render();
     });
 
