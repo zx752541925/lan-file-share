@@ -25,7 +25,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -120,6 +122,8 @@ type Auth struct {
 	secret        []byte
 	hostKey       string // 当前有效的一次性主机密钥，空表示已用过（需重新生成）
 	trustLoopback bool   // 直连且来自回环地址时视为主机（本地开发用；经 nginx 时必须关闭）
+	statePath     string // 邀请码/设备记录的落盘位置（重启后手机不用重新扫码）
+	dirty         bool   // 有"只更新了心跳类字段"的改动还没写盘
 
 	hostTTL   time.Duration // 主机 cookie 有效期（滑动）
 	guestTTL  time.Duration // 访客 cookie 有效期（滑动）
@@ -140,12 +144,15 @@ func NewAuth(secretPath string, trustLoopback bool, hostTTL, guestTTL, inviteTTL
 		secret:        secret,
 		hostKey:       randomToken(hostKeyLen),
 		trustLoopback: trustLoopback,
+		statePath:     filepath.Join(filepath.Dir(secretPath), "auth-state.json"),
 		hostTTL:       hostTTL,
 		guestTTL:      guestTTL,
 		inviteTTL:     inviteTTL,
 		invites:       make(map[string]*Invite),
 		seen:          make(map[string]*SeenDevice),
 	}
+	auth.loadState()
+	go auth.flushLoop()
 	return auth, nil
 }
 
@@ -208,6 +215,7 @@ func (a *Auth) CreateInvite(note string, advanced bool) Invite {
 		Status:    statusPending,
 	}
 	a.invites[invite.ID] = invite
+	a.saveLocked()
 	return *invite
 }
 
@@ -237,6 +245,7 @@ func (a *Auth) RevokeInvite(id string) bool {
 	}
 	invite.Revoked = true
 	invite.Status = statusRevoked
+	a.saveLocked()
 	return true
 }
 
@@ -279,6 +288,7 @@ func (a *Auth) RedeemInvite(code, ip, ua string) (Identity, string) {
 	invite.BoundUA = ua
 	invite.LastSeen = invite.UsedAt
 	invite.Status = statusUsed
+	a.saveLocked()
 
 	return Identity{
 		Role: RoleGuest, InviteID: invite.ID, PassID: invite.passID,
@@ -430,6 +440,7 @@ func (a *Auth) inviteFor(inviteID, passID string) *Invite {
 	}
 	invite.LastSeen = time.Now().UnixMilli()
 	invite.Status = statusUsed
+	a.dirty = true // 心跳类改动：攒着由 flushLoop 定时写盘，别每个请求都写文件
 	out := *invite
 	return &out
 }
@@ -463,6 +474,7 @@ func (a *Auth) touch(id Identity) {
 	entry.IP = id.IP
 	entry.UA = id.UA
 	entry.LastAt = now
+	a.dirty = true // 心跳类改动，交给 flushLoop 定时落盘
 }
 
 // SetDeviceName 在浏览器上报昵称后更新设备记录。
@@ -474,6 +486,7 @@ func (a *Auth) SetDeviceName(deviceKey, name string) {
 	defer a.mu.Unlock()
 	if entry, ok := a.seen[deviceKey]; ok {
 		entry.Name = name
+		a.dirty = true
 	}
 }
 
@@ -518,6 +531,13 @@ func (a *Auth) cleanupLocked() {
 	for id, invite := range a.invites {
 		if invite.UsedAt == 0 && !invite.Revoked && now > invite.ExpiresAt {
 			delete(a.invites, id)
+			a.dirty = true
+			continue
+		}
+		// 已绑定的设备：凭证早过了（3 倍 cookie 有效期），记录就没必要留着
+		if invite.UsedAt > 0 && now-invite.LastSeen > int64(3*a.guestTTL/time.Millisecond) {
+			delete(a.invites, id)
+			a.dirty = true
 		}
 	}
 	// 设备记录最多保留 200 条
@@ -577,6 +597,131 @@ func requestIsHTTPS(r *http.Request) bool {
 		return true
 	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+/* ---------------- 持久化 ---------------- */
+
+// 为什么邀请码/设备记录必须落盘：它们原来只活在内存里，服务一重启 invites 就空了，
+// 于是 inviteFor() 判定"邀请码不存在" → 所有访客 cookie 立刻失效，每台手机都得重新扫码。
+// 签名密钥本来就落盘（cookie 能跨重启），邀请码不落盘等于白搭。
+type authStateFile struct {
+	Version int               `json:"version"`
+	Invites []persistedInvite `json:"invites"`
+	Seen    []SeenDevice      `json:"seen"`
+}
+
+// persistedInvite 是 Invite 的可持久化形态：把只在服务端用的 passID（访客凭证）也写进去，
+// 否则重启后认不出"这台手机是哪个访客"。
+type persistedInvite struct {
+	ID        string `json:"id"`
+	Note      string `json:"note"`
+	Advanced  bool   `json:"advanced"`
+	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt"`
+	UsedAt    int64  `json:"usedAt,omitempty"`
+	Revoked   bool   `json:"revoked,omitempty"`
+	BoundIP   string `json:"boundIp,omitempty"`
+	BoundUA   string `json:"boundUa,omitempty"`
+	LastSeen  int64  `json:"lastSeen,omitempty"`
+	PassID    string `json:"passId,omitempty"`
+}
+
+// loadState 读取上次落盘的邀请码与设备记录（文件不存在就当作第一次运行）。
+func (a *Auth) loadState() {
+	raw, err := os.ReadFile(a.statePath)
+	if err != nil {
+		return
+	}
+	var state authStateFile
+	if err := json.Unmarshal(raw, &state); err != nil {
+		log.Printf("认证状态读取失败（忽略，按空状态启动）：%v", err)
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, it := range state.Invites {
+		if it.ID == "" {
+			continue
+		}
+		invite := &Invite{
+			ID: it.ID, Note: it.Note, Advanced: it.Advanced,
+			CreatedAt: it.CreatedAt, ExpiresAt: it.ExpiresAt,
+			UsedAt: it.UsedAt, Revoked: it.Revoked,
+			BoundIP: it.BoundIP, BoundUA: it.BoundUA, LastSeen: it.LastSeen,
+			passID: it.PassID,
+		}
+		invite.Status = a.statusLocked(invite)
+		a.invites[invite.ID] = invite
+	}
+	for _, dev := range state.Seen {
+		if dev.Key == "" {
+			continue
+		}
+		entry := dev
+		a.seen[entry.Key] = &entry
+	}
+
+	bound := 0
+	for _, invite := range a.invites {
+		if invite.passID != "" && !invite.Revoked {
+			bound++
+		}
+	}
+	if bound > 0 {
+		log.Printf("认证状态：已恢复 %d 个已绑定设备（%s），它们不用重新扫码", bound, a.statePath)
+	}
+}
+
+// saveLocked 原子写盘（先写临时文件再改名）；调用方必须已持有 a.mu。
+func (a *Auth) saveLocked() {
+	a.dirty = false
+	state := authStateFile{Version: 1}
+	for _, invite := range a.invites {
+		state.Invites = append(state.Invites, persistedInvite{
+			ID: invite.ID, Note: invite.Note, Advanced: invite.Advanced,
+			CreatedAt: invite.CreatedAt, ExpiresAt: invite.ExpiresAt,
+			UsedAt: invite.UsedAt, Revoked: invite.Revoked,
+			BoundIP: invite.BoundIP, BoundUA: invite.BoundUA, LastSeen: invite.LastSeen,
+			PassID: invite.passID,
+		})
+	}
+	for _, entry := range a.seen {
+		state.Seen = append(state.Seen, *entry)
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		a.dirty = true
+		log.Printf("认证状态序列化失败：%v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(a.statePath), 0o755); err != nil {
+		a.dirty = true
+		return
+	}
+	tmp := a.statePath + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		a.dirty = true
+		log.Printf("认证状态写入失败：%v", err)
+		return
+	}
+	if err := os.Rename(tmp, a.statePath); err != nil {
+		a.dirty = true
+		log.Printf("认证状态改名失败：%v", err)
+	}
+}
+
+// flushLoop 定时把"心跳类"改动写盘（设备最近上线时间每个请求都变，不值得每请求写一次文件）。
+func (a *Auth) flushLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.mu.Lock()
+		if a.dirty {
+			a.saveLocked()
+		}
+		a.mu.Unlock()
+	}
 }
 
 // randomToken 生成 n 字节随机数的十六进制串。

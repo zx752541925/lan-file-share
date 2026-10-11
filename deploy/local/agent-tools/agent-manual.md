@@ -59,6 +59,9 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 2. 再 `gui_click` 正式点击；输入用 `gui_type`；开程序用 `gui_open`
 3. 看返回的逐步 JSON：
    - `verify` 三档：`changed`（明显变化，多半生效）/ `minor_change`（只有小变化，可能只是选中态，不确定）/ `unchanged`（没变化 → 可能点空了、按钮无响应、或权限不够）
+   - 找不到文字时，返回里会**列出窗口里的文字及坐标**（如 `'三角洲行动'@400,738`）。OCR 会把中文读错
+     （实测"三角洲"→"三甬洲"、"商店"→"囱商店"），所以：先换页面/滚动确认目标真在画面上；
+     确实看到目标但文字被认错，就用相近候选的坐标走 `gui_click(x=…, y=…)`
    - 屏幕上有**多处相同文字**时会给 `text_alternatives`（候选 + 实际选中了哪个），必要时用 `gui_click(x=…, y=…)` 指定
    - `activate=already_foreground` 表示窗口本来就在最前面：不要再用别的方式去"置前"，某些启动器（WeGame）被置前会把窗口缩回托盘
    - `result=failed` 就看 **`at_step`（卡在哪一步）** 和 **`suggestion`**，照建议来
@@ -74,6 +77,18 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 - **同一个目标连续失败 2 次就停下**，用 `gui_shot` 截图 + 一句话说明卡在哪，让人判断
 
 > 底层实现：`win-gui-tools/gui.ps1` 是一条确定性流水线，`win-gui-mcp` 把它暴露成上面的工具。
+
+## 技能库（直跑，不经过你）
+
+同一个任务做成功之后，服务会把这串工具调用自动固化成一条技能，存在你 CODEX_HOME 的
+`skills/macro-*/` 下（含 `macro.json` 和一份 `SKILL.md`）。**下次同类任务由服务直接串行执行，
+不经过你**（3-5 秒完成）。所以你只要第一次把它做对、做得干净：
+
+- 步骤会被自动记录成技能：`gui_open` / `gui_click` / `gui_type` / `gui_shot`，以及**真正干活的 shell 命令**
+  （`ls` / `cat` / `find` / `grep` 这类"只看一眼"的命令不会记，不用刻意回避）
+- 别把 `dry_run` 当正式步骤（宏会自动忽略它），正式点击要真的生效
+- 直跑时任一步不符合预期（工具报失败、点击后界面没变化）会自动放弃并交回给你重新决策
+- 自己写技能：如果一件事以后一定会重复，而你用的是 shell 命令，用 `skill-creator` 写成技能，脚本放技能目录
 > 如果你的工具列表里没有 `gui_*`（说明 MCP 没加载），再用 shell 调用
 > `powershell.exe -File ~/.codex/win-gui-tools/gui.ps1 -Action ... -Json` 作为兜底。
 
@@ -96,12 +111,24 @@ ls /mnt/c/Windows/System32/*.exe | head -50
 ~/projects/局域网文件传输/deploy/local/agent-tools/send-file.sh <文件路径> [说明文字]
 ```
 
-例：截屏并发出来 =
+例：截屏并发出来 = **先 `gui_shot` 截图，再用 `send-file.sh` 发**（这是唯一推荐写法）：
+
+```
+gui_shot(save_to="C:\Users\Public\shot-<当前时间戳>.png")   → 返回 path
+```
 
 ```bash
-"$PS" -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w ~/projects/局域网文件传输/deploy/local/agent-tools/screenshot.ps1)" -Out 'C:\Users\Public\shot.png'
-~/projects/局域网文件传输/deploy/local/agent-tools/send-file.sh /mnt/c/Users/Public/shot.png "截图"
+~/projects/局域网文件传输/deploy/local/agent-tools/send-file.sh "$(wslpath -u 'C:\Users\Public\shot-<时间戳>.png')" "截图"
 ```
+
+两条硬性要求（都踩过坑）：
+
+1. **文件名带时间戳**，别每次都用同一个 `shot.png`：截图失败时旧文件还在原地，
+   `send-file.sh` 会把它当成新图发出去，用户看到的就是"过时的截屏"。
+   `send-file.sh` 现在默认拒发超过 120 秒的文件（确实要发旧文件加 `-f`）。
+2. **不要用 `$(wslpath -w ~/projects/局域网文件传输/...)` 这种自己拼的 UNC 路径**去调
+   PowerShell：路径里的中文经 WSL→Windows 传参会变成乱码，脚本直接找不到（实测）。
+   要跑脚本就用 `~/.codex/win-gui-tools/` 下的副本（纯 ASCII 路径），或者直接用上面的 MCP 工具。
 
 ## 4. 行为准则
 

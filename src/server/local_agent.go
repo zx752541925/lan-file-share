@@ -81,6 +81,8 @@ type agentTask struct {
 	canceled bool // 排队中就被取消
 	// goodCommands 记录这次任务里成功执行的命令，用于沉淀经验
 	goodCommands []string
+	// goodSteps 记录这次任务里成功的**工具调用**（工具名 + 参数），用于沉淀技能（宏）
+	goodSteps []AgentMacroStep
 	// 步数控制：命令与 MCP 调用都算一步，超过上限就终止任务（防止无限试错）
 	steps     int
 	stepLimit int
@@ -140,6 +142,10 @@ type Agent struct {
 	maxSteps int           // 单个任务最多几步（命令 + MCP 调用），<=0 表示不限制
 	home     string        // 独立的 CODEX_HOME：自带一份 config.toml 和 AGENTS.md
 	baseURL  string        // 可选：把 provider 的 base_url 改写成它（例如指向本地 shim）
+	// 技能（宏）直跑用的两条路径：Windows PowerShell 和 gui.ps1（Windows 路径形式）。
+	// 任一为空表示本机没有这套 GUI 工具，技能直跑自动关闭（只走模型那条路）。
+	powershell string
+	guiScript  string
 	// 经验库：记录"做过的任务 + 当时成功的命令"，下次同类任务直接照做
 	expPath string
 
@@ -223,6 +229,10 @@ func newAgent(name, trigger, cwd, homeDir, baseURL string, timeout time.Duration
 		seen:     make(map[string]bool),
 	}
 	agent.syncConfig()
+	agent.powershell, agent.guiScript = resolveGuiTools()
+	if agent.powershell != "" {
+		log.Printf("agent：技能直跑就绪（%s）", agent.guiScript)
+	}
 	go agent.run()
 
 	log.Printf("agent：聊天室 Codex 已启用，触发词 %q，工作目录 %s，CODEX_HOME %s，单次超时 %s",
@@ -593,6 +603,18 @@ func (a *Agent) process(job agentJob) {
 	log.Printf("agent：开始处理消息 %s（会话 %s，历史 %d 条）", job.message.ID, job.sessionID, len(history))
 	task.add("note", fmt.Sprintf("开始处理：%s", task.Prompt))
 
+	// 先看技能库：同一件事做过且成功过 ≥2 次 → 直接串行执行，模型不参与（3-5 秒）
+	if macro, ok := a.findRunnableMacro(task.Prompt); ok {
+		task.add("note", fmt.Sprintf("命中技能「%s」（%d 步，成功过 %d 次）：直跑，模型不参与", macro.Prompt, len(macro.Steps), macro.Successes))
+		if a.runMacro(job, task, macro) {
+			task.finish("done", "", nil)
+			task.add("message", fmt.Sprintf("已完成（技能直跑，模型没参与）：%s", macro.Prompt))
+			a.reply(job, fmt.Sprintf("已完成 ✅（技能直跑：%s）", macro.Prompt))
+			return
+		}
+		task.add("note", "技能直跑没通过复验，已退回模型重新决策")
+	}
+
 	reply, usage, err := a.execWithSession(task, history)
 	elapsed := time.Since(started).Round(time.Millisecond)
 	if err != nil {
@@ -608,7 +630,8 @@ func (a *Agent) process(job agentJob) {
 	}
 	log.Printf("agent：处理完成（耗时 %s，回复 %d 字）", elapsed, len([]rune(reply)))
 	task.finish("done", "", usage)
-	a.learn(task) // 把这次成功的命令沉淀下来，下次直接参考
+	a.learn(task)       // 把这次成功的命令沉淀下来，下次直接参考
+	a.recordMacro(task) // 把这次成功的工具调用序列沉淀成技能（同一意图成功 2 次后即可直跑）
 	// 事件流里通常已经带了最终回复，避免重复记一条
 	task.mu.Lock()
 	hasReply := false
@@ -876,6 +899,10 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 				} else if event.Item.Command != "" {
 					// 记下成功执行的命令，任务结束后沉淀到 learned.md
 					task.goodCommands = append(task.goodCommands, event.Item.Command)
+					// 同一个有序列表里也记一份：技能（宏）直跑时 shell 命令同样是"一步"
+					// （否则像"截屏并发到聊天室"这种全靠 shell 的任务永远不会被固化成技能）
+					args, _ := json.Marshal(map[string]string{"command": event.Item.Command})
+					task.goodSteps = append(task.goodSteps, AgentMacroStep{Tool: "shell", Args: args})
 				}
 			}
 		case "agent_message":
@@ -898,8 +925,14 @@ func parseAgentEvent(line string, task *agentTask) (*AgentUsage, string) {
 					// 成功的工具调用也要沉淀：原来只记 shell 命令，结果"用 gui_ 工具两步搞定"的
 					// 任务被记成了"先用 find 满盘找 exe"，下次同类任务照着经验又去翻路径。
 					if !strings.Contains(string(event.Item.Result), "failed") {
+						toolName := strings.TrimPrefix(label, "win-gui.")
 						task.goodCommands = append(task.goodCommands,
-							fmt.Sprintf("%s %s", strings.TrimPrefix(label, "win-gui."), compactJSON(event.Item.Arguments, 200)))
+							fmt.Sprintf("%s %s", toolName, compactJSON(event.Item.Arguments, 200)))
+						// 记下结构化的一步：技能（宏）直跑时按这个序列执行，不经过模型
+						task.goodSteps = append(task.goodSteps, AgentMacroStep{
+							Tool: toolName,
+							Args: append(json.RawMessage(nil), event.Item.Arguments...),
+						})
 					}
 				}
 			}

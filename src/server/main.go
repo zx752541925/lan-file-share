@@ -55,6 +55,7 @@ func main() {
 	agentFlags := registerLocalAgentFlags()
 	openBrowser := flag.Bool("open", true, "启动后自动打开浏览器")
 	flag.Parse()
+	maybeRunSelfCheck(agentFlags, *dataDir) // -selfcheck：打印技能覆盖自查后直接退出
 
 	if *dataDir == "" {
 		if fileExists("go.mod") {
@@ -114,6 +115,7 @@ func main() {
 	mux.HandleFunc("/api/devices", app.handleDevices)
 	mux.HandleFunc("/api/agent/tasks", app.handleAgentTasks)
 	mux.HandleFunc("/api/agent/tasks/", app.handleAgentTaskAction)
+	mux.HandleFunc("/api/agent/macros", app.handleAgentMacros)
 	// 本地版专属：Codex 控制台页面（服务器版不会注册这条路由，见 local_setup.go）
 	registerLocalConsole(mux, app, pages, version)
 	mux.Handle("/", staticHandler(pages, version))

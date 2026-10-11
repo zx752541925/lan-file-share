@@ -85,6 +85,17 @@
     details.line[open] > summary .text { display: none; }
     details.line > .body { padding-left: 80px; }
     .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+    .group-title { padding: 10px 12px 6px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--muted); }
+    .group-title.foldable { cursor: pointer; user-select: none; }
+    .group-title.foldable:hover { color: var(--fg, #ddd); }
+    .group-hint { padding: 2px 12px 10px; color: var(--muted); font-size: 12px; }
+    .macros { border-top: 1px solid var(--line); padding: 8px 10px 12px; font-size: 12px; }
+    .macros .group-title { padding: 4px 2px 8px; }
+    .macro { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; }
+    .macro:hover { background: rgba(127,127,127,.12); }
+    .macro .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .macro .state { color: var(--muted); white-space: nowrap; }
+    .macro button { font-size: 11px; padding: 2px 8px; }
     footer { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
   </style>
 </head>
@@ -98,7 +109,10 @@
   </header>
 
   <main>
-    <section class="tasks" id="taskList"></section>
+    <section class="tasks">
+      <div id="taskList"></div>
+      <div class="macros" id="macroList"></div>
+    </section>
     <section class="detail">
       <div class="detail-head">
         <span class="title" id="detailTitle">选择左侧的任务查看过程</span>
@@ -121,6 +135,7 @@
       config: document.getElementById('configInfo'),
       summary: document.getElementById('summary'),
       list: document.getElementById('taskList'),
+      macros: document.getElementById('macroList'),
       title: document.getElementById('detailTitle'),
       fold: document.getElementById('foldBtn'),
       kill: document.getElementById('killBtn'),
@@ -130,6 +145,9 @@
 
     let selected = '';
     let tasks = [];
+    let macros = [];
+    let foldDone = true;              // 「已完成」任务默认收起
+    let foldMacros = true;            // 技能库默认收起
     let stopped = false;
     let expandAll = false;            // 「全部展开」按钮：控制折叠项默认是否打开
     const userOpen = new Map();       // 用户手动点开/收起过的行（刷新后保持）
@@ -150,10 +168,12 @@
     };
 
     function render() {
-      el.list.innerHTML = tasks.length
-        ? tasks
-            .map(
-              (task) => `<div class="task ${task.id === selected ? 'active' : ''}" data-id="${task.id}">
+      if (!tasks.length) {
+        el.list.innerHTML = '<div class="empty">还没有任务。在聊天室里发一条带 @Codex 的消息试试。</div>';
+      } else {
+        const active = tasks.filter((task) => task.status === 'running' || task.status === 'queued');
+        const finished = tasks.filter((task) => task.status !== 'running' && task.status !== 'queued');
+        const card = (task) => `<div class="task ${task.id === selected ? 'active' : ''}" data-id="${task.id}">
                 <div class="task-top">
                   <span class="state ${task.status}">${statusText(task.status)}</span>
                   <span class="task-prompt">${escapeHtml(task.prompt || '(空消息)')}</span>
@@ -164,10 +184,26 @@
                   <span>${fmtDuration(task)}</span>
                   <span>${fmtTokens(task.usage)}</span>
                 </div>
-              </div>`
-            )
-            .join('')
-        : '<div class="empty">还没有任务。在聊天室里发一条带 @Codex 的消息试试。</div>';
+              </div>`;
+
+        let html = '';
+        if (active.length) {
+          html += `<div class="group-title">进行中 (${active.length})</div>` + active.map(card).join('');
+        } else {
+          html += '<div class="group-title">进行中 (0)</div><div class="group-hint">没有正在跑的任务</div>';
+        }
+        if (finished.length) {
+          // 已经跑完的任务收纳起来，默认收起（要看就点这一行）
+          html += `<div class="group-title foldable" id="doneToggle">${foldDone ? '▸' : '▾'} 已完成 (${finished.length})</div>`;
+          if (foldDone) {
+            const inFold = finished.some((task) => task.id === selected);
+            html += inFold ? '<div class="group-hint">正在看的任务已收起 —— 点上面的标题展开</div>' : '';
+          } else {
+            html += finished.map(card).join('');
+          }
+        }
+        el.list.innerHTML = html;
+      }
 
       const current = tasks.find((task) => task.id === selected);
       if (!current) {
@@ -213,10 +249,31 @@
       return { queued: '排队中', running: '执行中', done: '已完成', failed: '失败', killed: '已终止', canceled: '已取消' }[status] || status;
     }
     function kindText(kind) {
-      return { command: '命令', output: '输出', message: '回复', error: '错误', note: '说明', raw: '原始', reasoning: '思考', mcp: 'MCP' }[kind] || kind;
+      return { command: '命令', output: '输出', message: '回复', error: '错误', note: '说明', raw: '原始', reasoning: '思考', mcp: 'MCP', macro: '技能', warn: '⚠️ 注意' }[kind] || kind;
     }
     function escapeHtml(text) {
       return String(text).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+    }
+
+    // 技能库：任务成功后会沉淀成"宏"，同一意图成功 2 次即可直跑（模型不参与）。
+    function macroState(macro) {
+      if (macro.disabled) return `已停用（连续失败 ${macro.failures} 次）`;
+      return `可直跑 · 成功 ${macro.successes} 次${macro.failures ? `／连续失败 ${macro.failures}` : ''}`;
+    }
+    function renderMacros() {
+      if (!macros.length) {
+        el.macros.innerHTML = '<div class="group-title" id="macroToggle">▸ 技能库 (0)</div>'
+          + (foldMacros ? '' : '<div class="group-hint">还没有沉淀技能：任务成功一次后自动生成。</div>');
+        return;
+      }
+      const head = `<div class="group-title foldable" id="macroToggle">${foldMacros ? '▸' : '▾'} 技能库 (${macros.length})</div>`;
+      if (foldMacros) { el.macros.innerHTML = head; return; }
+      el.macros.innerHTML = head + macros.map((m) => `
+        <div class="macro">
+          <span class="name" title="${escapeHtml(m.prompt || '')}｜${escapeHtml((m.steps || []).map((s) => s.tool).join(' → '))}">${escapeHtml(m.prompt || m.intent)}</span>
+          <span class="state">${escapeHtml(macroState(m))}</span>
+          <button type="button" class="danger" data-intent="${escapeHtml(m.intent)}">删除</button>
+        </div>`).join('');
     }
 
     async function refresh() {
@@ -225,6 +282,11 @@
         const res = await fetch(api('/api/agent/tasks'));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+
+        try {
+          const mres = await fetch(api('/api/agent/macros'));
+          if (mres.ok) macros = (await mres.json()).macros || [];
+        } catch { /* 技能库拿不到不影响任务列表 */ }
 
         tasks = data.tasks || [];
         if (!selected && tasks.length) selected = tasks[0].id;
@@ -235,12 +297,19 @@
         el.config.textContent = `触发词 ${data.trigger} · 工作目录 ${data.cwd} · 超时 ${data.timeout}s`;
         el.summary.textContent = `执行中 ${data.running} · 排队 ${data.queued} · 最近任务累计 ${(data.totalTokens || 0).toLocaleString()} token`;
         render();
+        renderMacros();
       } catch (error) {
         el.footer.textContent = `刷新失败：${error.message}（请确认你是用主机身份打开的，且服务在运行）`;
       }
     }
 
     el.list.addEventListener('click', (event) => {
+      if (event.target.closest('#doneToggle')) {   // 点标题行：展开/收起已完成
+        foldDone = !foldDone;
+        render();
+        return;
+      }
+      if (event.target.closest('#macroList button')) return; // 技能库的删除按钮自己处理
       const item = event.target.closest('.task');
       if (!item) return;
       selected = item.dataset.id;
@@ -263,6 +332,24 @@
       userOpen.clear(); // 清掉手动记录，这样「全部展开」和「全部折叠」都生效
       el.fold.textContent = expandAll ? '全部折叠' : '全部展开';
       render();
+    });
+
+    el.macros.addEventListener('click', async (event) => {
+      if (event.target.closest('#macroToggle')) {  // 点标题行：展开/收起技能库
+        foldMacros = !foldMacros;
+        renderMacros();
+        return;
+      }
+      const btn = event.target.closest('button[data-intent]');
+      if (!btn) return;
+      const intent = btn.dataset.intent;
+      if (!confirm('删除这条技能？下次同类任务会重新走模型决策。')) return;
+      try {
+        await fetch(api('/api/agent/macros?intent=' + encodeURIComponent(intent)), { method: 'DELETE' });
+        refresh();
+      } catch (error) {
+        el.footer.textContent = `删除失败：${error.message}`;
+      }
     });
 
     el.kill.addEventListener('click', async () => {
