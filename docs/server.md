@@ -137,7 +137,7 @@ sshd 原配置备份：`/etc/ssh/sshd_config.bak-20260920`。
 仓库里的部署脚本（在项目根目录执行）：
 
 ```bash
-scripts/deploy-server.sh          # 静态编译 linux 二进制 → 上传 → 重启 lanfile → 回显状态
+scripts/deploy.sh          # 静态编译 linux 二进制 → 上传 → 重启 lanfile → 回显状态
 scripts/deploy-nginx.sh    # 上传 nginx 配置 → 关默认站点 → nginx -t → 重启 → 放行 8080
 make build-linux           # 只编译：bin/lanfile-server-linux（CGO_ENABLED=0 静态链接）
 make build-windows         # 本地版 exe（从 tag v1.0-local 拉分支后使用）
@@ -164,9 +164,9 @@ ssh myecs 'du -sh /var/lib/lanfile; df -h /'             # 数据与磁盘占用
 
 | 需求 | 改哪里 |
 | --- | --- |
-| 换对外端口（如 8080 → 8081） | `deploy/server/nginx/lanfile.conf` 的 `listen`、`deploy/server/lanfile.service` 的 `-public-url`；再跑两个部署脚本；安全组放行新端口 |
+| 换对外端口（如 8080 → 8081） | `deploy/nginx/lanfile.conf` 的 `listen`、`deploy/lanfile.service` 的 `-public-url`；再跑两个部署脚本；安全组放行新端口 |
 | 上域名 + HTTPS | nginx 加 `server_name` 与 443 证书（Let's Encrypt），`-public-url` 改成 `https://域名`；`-base` 可保留或改成根路径 |
-| 新增一个服务 | 给它一个内部端口，在 `deploy/server/nginx/` 加一个 `location /<名字>/` 块，`scripts/deploy-nginx.sh` 跑一次（安全组不用动） |
+| 新增一个服务 | 给它一个内部端口，在 `deploy/nginx/` 加一个 `location /<名字>/` 块，`scripts/deploy-nginx.sh` 跑一次（安全组不用动） |
 | 让某人不能再用 | 主机页面「链接」面板里撤销对应邀请（立即生效） |
 | 清空所有身份 | `ssh myecs 'rm -f /var/lib/lanfile/secret.key && systemctl restart lanfile'`（所有人需重新邀请；谨慎） |
 

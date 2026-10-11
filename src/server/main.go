@@ -31,12 +31,6 @@ type App struct {
 	port      string
 	publicURL string
 	base      string // 访问子路径，形如 / 或 /lanfile/（前后都有斜杠）
-	agent     *Agent // 聊天室里的 Codex，未开启时为 nil
-
-	// 以下几个只在控制台页面上展示，方便主机确认配置
-	agentTrigger string
-	agentCwd     string
-	agentTimeout time.Duration
 }
 
 func main() {
@@ -51,11 +45,8 @@ func main() {
 	hostCookieDays := flag.Int("host-cookie-days", 30, "主机登录有效期（天，每次上线滑动续期）")
 	guestCookieDays := flag.Int("guest-cookie-days", 7, "访客登录有效期（天，每次上线滑动续期）")
 	inviteTTLHours := flag.Int("invite-ttl-hours", 24, "邀请链接未被使用时的有效期（小时）")
-	// 本地版专属的参数（-agent*）在 local_setup.go 里注册
-	agentFlags := registerLocalAgentFlags()
 	openBrowser := flag.Bool("open", true, "启动后自动打开浏览器")
 	flag.Parse()
-	maybeRunSelfCheck(agentFlags, *dataDir) // -selfcheck：打印技能覆盖自查后直接退出
 
 	if *dataDir == "" {
 		if fileExists("go.mod") {
@@ -92,8 +83,6 @@ func main() {
 	}
 	go app.hub.Run()
 
-	setupLocalAgent(app, agentFlags, *dataDir)
-
 	chunks := newChunkedUploads(filepath.Join(*dataDir, "tmp"), app)
 
 	pages, source := webAssets(*webDir)
@@ -113,11 +102,6 @@ func main() {
 	mux.HandleFunc("/api/invites", app.handleInvites)
 	mux.HandleFunc("/api/invites/", app.handleInviteByID)
 	mux.HandleFunc("/api/devices", app.handleDevices)
-	mux.HandleFunc("/api/agent/tasks", app.handleAgentTasks)
-	mux.HandleFunc("/api/agent/tasks/", app.handleAgentTaskAction)
-	mux.HandleFunc("/api/agent/macros", app.handleAgentMacros)
-	// 本地版专属：Codex 控制台页面（服务器版不会注册这条路由，见 local_setup.go）
-	registerLocalConsole(mux, app, pages, version)
 	mux.Handle("/", staticHandler(pages, version))
 
 	server := &http.Server{
@@ -271,26 +255,12 @@ func staticHandler(fsys fs.FS, version string) http.Handler {
 // assetsVersion 用前端文件内容算出版本号，内容不变则版本号不变。
 func assetsVersion(fsys fs.FS) string {
 	hash := fnv.New64a()
-	for _, name := range []string{"index.html", "styles.css", "app.js", "local/agent.html"} {
+	for _, name := range []string{"index.html", "styles.css", "app.js"} {
 		if raw, err := fs.ReadFile(fsys, name); err == nil {
 			_, _ = hash.Write(raw)
 		}
 	}
 	return strconv.FormatUint(hash.Sum64(), 36)
-}
-
-// pageHandler 直接吐一个页面文件，并把 __V__ 换成资源版本号（控制台页面用）。
-func pageHandler(fsys fs.FS, version, name string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		raw, err := fs.ReadFile(fsys, name)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = w.Write(bytes.ReplaceAll(raw, []byte("__V__"), []byte(version)))
-	}
 }
 
 func envOr(key, fallback string) string {
@@ -386,12 +356,6 @@ func (a *App) entry(next http.Handler) http.Handler {
 		query := r.URL.Query()
 
 		if key := query.Get("host"); key != "" {
-			// 已经有主机会话的浏览器再点旧链接（或启动器每次拿新链接、浏览器里存着旧 cookie）时，
-			// 不该被挡在"链接无效"页外面，直接放行；顺便也不会白白消耗一张还有效的密钥。
-			if a.auth.IdentityOf(nil, r).IsHost() {
-				a.redirectClean(w, r)
-				return
-			}
 			if a.auth.RedeemHostKey(key) {
 				a.auth.GrantHost(w, r)
 				log.Printf("主机已通过一次性链接登录（%s）", clientIP(r))
@@ -509,7 +473,6 @@ func templateEscape(text string) string {
 	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
 	return replacer.Replace(text)
 }
-
 // fatal 出错时在 Windows 上等一次回车，避免双击运行时窗口一闪而过看不到原因。
 func fatal(format string, args ...any) {
 	log.Printf("错误："+format, args...)

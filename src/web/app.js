@@ -8,8 +8,6 @@ const el = {
   fileCountBadge: document.getElementById('fileCountBadge'),
   uploadTray: document.getElementById('uploadTray'),
   composer: document.getElementById('composer'),
-  composerQuick: document.getElementById('composerQuick'),
-  codexChip: document.getElementById('codexChip'),
   input: document.getElementById('input'),
   pickTop: document.getElementById('pickTop'),
   pickChat: document.getElementById('pickChat'),
@@ -32,11 +30,9 @@ const el = {
   qrState: document.getElementById('qrState'),
   qrRotate: document.getElementById('qrRotate'),
   qrCopy: document.getElementById('qrCopy'),
-  qrAdvanced: document.getElementById('qrAdvanced'),
   sessionModal: document.getElementById('sessionModal'),
   sessionList: document.getElementById('sessionList'),
   linkBtn: document.getElementById('linkBtn'),
-  consoleBtn: document.getElementById('consoleBtn'),
   linkModal: document.getElementById('linkModal'),
   hostLinkInput: document.getElementById('hostLinkInput'),
   hostLinkCopy: document.getElementById('hostLinkCopy'),
@@ -44,7 +40,6 @@ const el = {
   hostQrBox: document.getElementById('hostQrBox'),
   inviteNote: document.getElementById('inviteNote'),
   inviteCreate: document.getElementById('inviteCreate'),
-  inviteAdvanced: document.getElementById('inviteAdvanced'),
   inviteList: document.getElementById('inviteList'),
   deviceList: document.getElementById('deviceList'),
   confirmModal: document.getElementById('confirmModal'),
@@ -103,7 +98,6 @@ const state = {
   hostLink: '',
   invites: [],
   devices: [],
-  canAgent: false,
 };
 
 // 旧版本的自动昵称（我的电脑-3F）作废，交给服务端重新分配
@@ -388,7 +382,6 @@ function connect() {
       case 'init':
         state.selfId = data.selfId;
         state.host = Boolean(data.host);
-        state.canAgent = Boolean(data.canAgent);
         state.peers = data.peers || 1;
         state.session = data.session;
         state.messages = data.history || [];
@@ -472,9 +465,7 @@ function renderSession() {
   el.sessionName.textContent = state.session ? formatSession(state.session.id) : '—';
   el.historyBtn.hidden = !state.host; // 只有主机能切换历史会话
   el.linkBtn.hidden = !state.host; // 只有主机能看主机链接与邀请管理
-  el.consoleBtn.hidden = !state.host; // 只有主机能进 Codex 控制台
   el.qrBtn.hidden = !state.host; // 二维码 = 一次性邀请，只有主机能发
-  el.composerQuick.hidden = !state.canAgent; // @Codex 快捷按钮：主机与高级邀请用户可见
 }
 
 function thumbHtml(file) {
@@ -710,7 +701,7 @@ async function newQrInvite() {
   const invite = await apiJSON(api('/api/invites'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ note: '扫码加入', advanced: Boolean(el.qrAdvanced?.checked) }),
+    body: JSON.stringify({ note: '扫码加入' }),
   });
   renderQrInvite(invite);
 }
@@ -955,14 +946,12 @@ function renderInvites() {
         ? `使用于 ${formatStamp(invite.usedAt)}`
         : `创建于 ${formatStamp(invite.createdAt)} · ${formatStamp(invite.expiresAt)} 过期`;
       const activity = invite.lastSeen ? ` · 最近活动 ${formatStamp(invite.lastSeen)}` : '';
-      const advanced = invite.advanced ? '<em class="invite-advanced">高级</em>' : '';
 
       return `<li class="invite-item">
           <span class="invite-main">
             <span class="invite-title">
               ${esc(invite.note || '未备注')}
               <em class="invite-status ${inviteStatusClass(invite.status)}">${esc(invite.status)}</em>
-              ${advanced}
             </span>
             <span class="invite-sub">${time}${activity}</span>
           </span>
@@ -983,12 +972,11 @@ function renderDevices() {
     .map((device) => {
       const title = device.name || (device.role === 'host' ? '主机' : '访客');
       const note = device.note ? ` · ${esc(device.note)}` : '';
-      const advanced = device.advanced ? ' <em class="invite-advanced">高级</em>' : '';
       const last = device.lastSeen ? `最近活动 ${formatStamp(device.lastSeen)}` : '—';
 
       return `<li class="device-item">
           <span class="device-main">
-            <span class="device-title">${esc(title)}${note}${advanced}</span>
+            <span class="device-title">${esc(title)}${note}</span>
             <span class="device-sub">${esc(device.ip || '')}${device.ua ? ` · ${esc(shortUA(device.ua))}` : ''}</span>
             <span class="device-sub">${last}</span>
           </span>
@@ -1027,9 +1015,6 @@ function openLinkModal() {
 
 el.linkBtn.addEventListener('click', openLinkModal);
 
-// 新页签打开 Codex 控制台（路径前缀随当前页面，服务器版是 /lanfile/agent）
-el.consoleBtn.addEventListener('click', () => window.open(`${BASE}agent`, '_blank'));
-
 el.hostLinkCopy.addEventListener('click', () => copyText(state.hostLink));
 
 el.hostLinkRotate.addEventListener('click', async () => {
@@ -1047,10 +1032,7 @@ el.inviteCreate.addEventListener('click', async () => {
     const invite = await apiJSON(api('/api/invites'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        note: el.inviteNote.value.trim(),
-        advanced: Boolean(el.inviteAdvanced?.checked),
-      }),
+      body: JSON.stringify({ note: el.inviteNote.value.trim() }),
     });
     el.inviteNote.value = '';
     await loadInvites();
@@ -1323,14 +1305,6 @@ for (const picker of [el.pickTop, el.pickChat]) {
 }
 
 el.attachBtn.addEventListener('click', () => el.pickChat.click());
-
-// 点一下把 @Codex 填进输入框（触发词不区分大小写，服务端照样认）
-el.codexChip.addEventListener('click', () => {
-  const text = el.input.value;
-  el.input.value = text && !text.endsWith(' ') ? `${text} @Codex ` : `${text}@Codex `;
-  el.input.focus();
-  autoGrow();
-});
 
 el.fileList.addEventListener('click', (event) => {
   const reveal = event.target.closest('[data-reveal]');

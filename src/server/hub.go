@@ -35,7 +35,6 @@ type Client struct {
 	// 以下字段用于主机页面的「在线设备」列表
 	deviceKey   string // 主机固定 "host"，访客为凭证 ID
 	inviteID    string // 访客来源邀请码（主机为空）
-	advanced    bool   // 高级权限（可触发 Codex）
 	ip          string
 	ua          string
 	connectedAt int64
@@ -48,7 +47,6 @@ type ClientInfo struct {
 	Name        string
 	Host        bool
 	InviteID    string
-	Advanced    bool
 	IP          string
 	UA          string
 	ConnectedAt int64
@@ -124,7 +122,6 @@ func (h *Hub) Run() {
 					Name:        client.name,
 					Host:        client.host,
 					InviteID:    client.inviteID,
-					Advanced:    client.advanced,
 					IP:          client.ip,
 					UA:          client.ua,
 					ConnectedAt: client.connectedAt,

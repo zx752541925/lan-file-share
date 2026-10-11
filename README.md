@@ -6,24 +6,10 @@ PC 与手机浏览器打开同一地址，即可聊天、互传文件。服务�
 
 同一个仓库里有两种形态，**代码同源**，差异只在「访问准入」和「会话语义」，不是两套代码：
 
-仓库目录按版本分区（公共逻辑两个版本共用，不做拆分）：
-
-```
-src/server/            公共后端（session/hub/api/upload/auth…）
-├── local_agent.go       本地版：聊天室 Codex 主体
-├── local_agent_api.go   本地版：控制台的两个接口
-└── local_setup.go       本地版：-agent* 参数、接线、/agent 路由
-src/web/               公共前端（index/app/styles/vendor）
-└── local/agent.html     本地版：Codex 控制台页面
-deploy/local/          本地版资产：Windows 启动器源码、portproxy.ps1、用户级 systemd 单元
-deploy/server/         服务器版资产：systemd 单元、nginx 配置
-docs/local.md          本地版说明        docs/server.md  服务器版配置清单
-```
-
 | 形态 | 位置 | 形态与行为 | 状态 |
 | --- | --- | --- | --- |
 | 本地版 | tag `v1.0-local` | Windows 单文件 exe（`make build-windows`），局域网直连、无鉴权、**每次启动 = 一个新会话** | **已归档**，除修 bug 外不再演进 |
-| 服务器版 | `main` 分支 | Linux 静态二进制 + systemd 常驻（`make build-linux` + `scripts/deploy-server.sh`），只监听回环、经 nginx 入口访问；主机用一次性链接换 cookie，访客必须由主机邀请 | 开发中 |
+| 服务器版 | `main` 分支 | Linux 静态二进制 + systemd 常驻（`make build-linux` + `scripts/deploy.sh`），只监听回环、经 nginx 入口访问；主机用一次性链接换 cookie，访客必须由主机邀请 | 开发中 |
 
 ### 从归档点继续开发本地版
 
@@ -39,10 +25,10 @@ make build-windows                   # 重新产出 dist/lanfile-server.exe
 
 ```bash
 make build-linux     # 静态编译（不依赖 glibc），产物 bin/lanfile-server-linux
-scripts/deploy-server.sh   # 上传 → 安装 systemd 单元 → 重启 → 回显状态与日志
+scripts/deploy.sh    # 上传 → 安装 systemd 单元 → 重启 → 回显状态与日志
 ```
 
-服务器上以专用用户 `lanfile` 运行，只监听 `127.0.0.1:41730`，数据在 `/var/lib/lanfile`（与二进制分离，重装不丢会话）。细节见 [deploy/server/lanfile.service](deploy/server/lanfile.service) 与 [scripts/deploy-server.sh](scripts/deploy-server.sh)；本地版的说明见 [docs/local.md](docs/local.md)。
+服务器上以专用用户 `lanfile` 运行，只监听 `127.0.0.1:41730`，数据在 `/var/lib/lanfile`（与二进制分离，重装不丢会话）。细节见 [deploy/lanfile.service](deploy/lanfile.service) 与 [scripts/deploy.sh](scripts/deploy.sh)。
 
 ## 主要文件
 
@@ -73,7 +59,7 @@ scripts/deploy-server.sh   # 上传 → 安装 systemd 单元 → 重启 → 回
 | 文件 | 作用 |
 | --- | --- |
 | [Makefile](Makefile) | 构建入口：`make run` / `make build` / `make build-windows` |
-| [deploy/local/portproxy.ps1](deploy/local/portproxy.ps1) | Windows 10 下把端口映射进 WSL（用 exe 时不需要）|
+| [scripts/windows/portproxy.ps1](scripts/windows/portproxy.ps1) | Windows 10 下把端口映射进 WSL（用 exe 时不需要）|
 
 文档内快速跳转：[运行](#运行) · [Windows 单文件版](#windows-单文件版) · [接口](#接口) · [会话与主机](#会话与主机) · [文件存储](#文件存储) · [断点续传](#断点续传) · [手机打不开？](#手机打不开) · [环境变量](#环境变量) · [目录](#目录)
 
@@ -167,7 +153,7 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | `src/web/` | 前端静态资源：页面、样式、交互脚本、`vendor/qrcode.js` 二维码库 |
 | `src/server/` | Go 后端：入口 `main.go`、连接管理 `hub.go`、接口 `api.go`、会话与存储 `session.go` |
 | `data/sessions/<日期_时间>/` | 一个会话一个文件夹：`session.json` 存聊天与文件元数据，`uploads/` 存文件本体 |
-| `deploy/local/portproxy.ps1` | Windows 10 下把端口映射进 WSL（用 exe 时不需要） |
+| `scripts/windows/portproxy.ps1` | Windows 10 下把端口映射进 WSL（用 exe 时不需要） |
 | `webassets.go` | 把 `src/web` 编译进二进制，供单文件分发 |
 | `src/server/auth.go` | 权限判定（目前只有"主机"角色），上公网时在这里扩展登录态 |
 
@@ -206,53 +192,7 @@ powershell -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\xu\projects\局域�
 | `-guest-cookie-days` | `7` | 访客 cookie 有效期（天），每次上线滑动续期 |
 | `-invite-ttl-hours` | `24` | 邀请链接未被使用时的有效期（小时） |
 
-聊天室里的 Codex（默认关闭，只在本机开）：
-
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `-agent` | `false` | 总开关：开启后聊天室里多一个由本机 `codex` CLI 扮演的成员 |
-| `-agent-trigger` | `@codex` | 触发词，消息里出现它才回复（不分大小写） |
-| `-agent-name` | `Codex` | 聊天里显示的昵称 |
-| `-agent-cwd` | `sessions` | 工作目录；相对路径按数据目录解析，默认 `data/sessions` |
-| `-agent-home` | 空 | 给 Codex 用的独立 `CODEX_HOME`（自带免确认的 `AGENTS.md`），默认 `<数据目录>/agent-home` |
-| `-agent-base-url` | 空 | 把 agent 的 provider `base_url` 改写成这个地址（例如 `http://127.0.0.1:41780/`，配合本地 `deepseek-shim` 就能在控制台看到「思考」行） |
-| `-agent-timeout` | `300` | 单次执行超时（秒），超时按进程组整棵杀掉 |
-| `-agent-max-steps` | `12` | 单个任务最多几步（命令 + 工具调用都算），超限终止并说明卡在哪；`0` = 不限制 |
-| `-agent-notify` | `true` | 执行失败时在聊天里发一条提示（否则只记日志） |
-
 ## 身份与准入（服务器版）
-
-### 聊天室里的 Codex（可选，仅本机）
-
-加 `-agent` 启动后，聊天窗口里会多一个昵称 `Codex` 的成员，由本机 `codex` CLI 驱动：
-
-```
-你: @codex 看下 data/sessions 里有什么文件
-Codex: 目录下有 2026-10-08_19-42-52/ 一个会话目录，里面是空的。
-```
-
-- **谁能触发**：主机，以及用「高级邀请」进来的访客；其他访客只能正常聊天，发 `@codex` 不会有任何反应（权限判断在服务端，不依赖前端）
-- **触发方式**：消息文本里出现 `@codex`（不分大小写）；Codex 自己的消息不会触发自己
-- **执行方式**：`codex exec --ephemeral -s danger-full-access -C <工作目录>`，完全授权（可读写文件、执行命令），每次都是全新会话，上下文靠最近 20 条聊天记录拼接
-- **串行**：一次只跑一个，队列上限 3，满了直接丢弃并记日志；任何情况都不会阻塞聊天（调用方立即返回）
-- **超时**：默认 300 秒，超时连子进程一起按进程组杀掉，避免留下孤儿继续改文件
-- **配置隔离**：agent 用独立的 `CODEX_HOME`（默认 `<数据目录>/agent-home`），里面有自己的一份 `AGENTS.md`（明确"直接执行、不要请求确认"）和一份从 `~/.codex/config.toml` 同步来的配置。**不这样做的话，嵌套的 codex 会读到你 `~/.codex/AGENTS.md` 里的"动手前先确认"规则而拒绝干活**
-- **看得到思考过程**：DeepSeek 的 responses 接口其实会返回思考原文（`content[].reasoning_text`），但 `summary` 是空数组，而 Codex 只渲染 `summary` 通道，所以直连时看不到。配上 `-agent-base-url http://127.0.0.1:41780/`（指向本地 `deepseek-shim`）后，shim 会把原文转成 Codex 认的摘要，控制台里就会出现紫色的「思考」行
-
-### Codex 控制台（`/agent`，仅主机）
-
-主机顶栏「控制台」按钮会在新页签打开 `<base>/agent`：
-
-- 左侧任务列表：排队中 / 执行中 / 已完成 / 失败 / 已终止，附触发人、耗时、token 用量
-- 右侧实时输出：`命令`（执行的 shell 命令）、`输出`（命令结果）、`回复`（最终回复）、`思考`（配 shim 才有）、`错误`
-- 「终止这个任务」按钮：按进程组 `SIGKILL`，连同它拉起的子进程一起杀
-- 页面与接口都只有主机可访问（访客会被 302 送回聊天页）
-
-风险提示：
-
-- 完全授权 + 高级邀请 = 拿到邀请的人可以让它在工作目录下任意读写、执行命令
-- 工作目录默认收窄到 `data/sessions`，但 `danger-full-access` 下它仍能读到目录之外（例如 `data/secret.key`），**能触发的人选才是真正的防线**
-- 走本机 `~/.codex` 的 provider（当前是 deepseek），按量计费；长对话会持续消耗 token
 
 ### 按路径分发多个服务
 
@@ -264,7 +204,7 @@ http://<公网IP>:8080/lanfile/  → lanfile（后端带 -base /lanfile/ 启动�
 http://<公网IP>:8080/<其他>/   → 以后新增的服务
 ```
 
-配置见 [deploy/server/nginx/lanfile.conf](deploy/server/nginx/lanfile.conf)：`location /lanfile/` 原样透传，
+配置见 [deploy/nginx/lanfile.conf](deploy/nginx/lanfile.conf)：`location /lanfile/` 原样透传，
 后端用 `-base` 自己剥前缀，两边不重复改写路径；`location /` 直接 404，避免未定义的服务被误转发。
 前端所有请求都由 `location.pathname` 推导出前缀（`const BASE = location.pathname.replace(/[^/]*$/, '')`），
 所以同一份前端在根路径（本地版）和子路径（服务器版）下都能用。
@@ -277,9 +217,6 @@ http://<公网IP>:8080/<其他>/   → 以后新增的服务
 - **访客**：必须由主机邀请。邀请链接**一人一码、24 小时内有效**，谁先打开就绑定谁，
   转发给别人打不开；点开后换成 7 天滑动续期的 cookie。主机撤销该邀请后，
   对应设备**下一次请求就会被挡在门外**，不用等 cookie 过期。
-- **高级邀请**：生成邀请时可以勾选「高级权限」，勾了之后这个访客除了聊天，还能
-  触发聊天室里的 Codex（见下一节）。普通邀请只能聊天，二维码弹窗和「链接」面板里
-  都有这个勾选框，邀请列表和在线设备列表里会显示绿色的「高级」标记。
 
 设计取舍：
 

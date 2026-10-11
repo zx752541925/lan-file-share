@@ -1,4 +1,4 @@
-﻿# 让手机/平板能访问运行在 WSL2 里的服务（Windows 10/11 通用）
+# 让手机/平板能访问运行在 WSL2 里的服务（Windows 10/11 通用）
 #
 # 一次性安装（管理员 PowerShell）：
 #   powershell -ExecutionPolicy Bypass -File portproxy.ps1 -Install

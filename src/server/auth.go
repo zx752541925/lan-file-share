@@ -25,9 +25,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -63,7 +61,6 @@ type Identity struct {
 	Role     Role   // 主机 / 访客
 	InviteID string // 访客来源邀请码 ID（主机为空）
 	PassID   string // 访客凭证 ID：用于设备识别与「撤销邀请后立即失效」
-	Advanced bool   // 高级权限：主机恒为 true；访客取决于邀请码上有没有勾选
 	IP       string // 来源 IP（经 nginx 时取 X-Forwarded-For 的第一段）
 	UA       string // User-Agent，仅作展示
 }
@@ -73,9 +70,6 @@ func (i Identity) Valid() bool { return i.Role == RoleHost || i.Role == RoleGues
 
 // IsHost 表示是否主机。
 func (i Identity) IsHost() bool { return i.Role == RoleHost }
-
-// CanUseAgent 表示是否有权触发聊天室里的 Codex（主机或高级邀请用户）。
-func (i Identity) CanUseAgent() bool { return i.Role == RoleHost || i.Advanced }
 
 // DeviceKey 是身份对应的设备标识：主机固定为 "host"，访客用凭证 ID。
 func (i Identity) DeviceKey() string {
@@ -87,9 +81,8 @@ func (i Identity) DeviceKey() string {
 
 // Invite 是主机发出的某一张邀请链接。
 type Invite struct {
-	ID        string `json:"id"`       // 邀请码，同时是链接里的 code
-	Note      string `json:"note"`     // 备注：发给谁
-	Advanced  bool   `json:"advanced"` // 勾选后对方可触发 Codex（等同于"高级权限"）
+	ID        string `json:"id"`        // 邀请码，同时是链接里的 code
+	Note      string `json:"note"`      // 备注：发给谁
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt"` // 未被使用时的失效时间
 	UsedAt    int64  `json:"usedAt,omitempty"`
@@ -106,7 +99,6 @@ type Invite struct {
 type SeenDevice struct {
 	Key      string `json:"key"`
 	Role     Role   `json:"role"`
-	Advanced bool   `json:"advanced,omitempty"`
 	Name     string `json:"name,omitempty"` // 前端 hello 上报的昵称
 	InviteID string `json:"inviteId,omitempty"`
 	Note     string `json:"note,omitempty"`
@@ -122,8 +114,6 @@ type Auth struct {
 	secret        []byte
 	hostKey       string // 当前有效的一次性主机密钥，空表示已用过（需重新生成）
 	trustLoopback bool   // 直连且来自回环地址时视为主机（本地开发用；经 nginx 时必须关闭）
-	statePath     string // 邀请码/设备记录的落盘位置（重启后手机不用重新扫码）
-	dirty         bool   // 有"只更新了心跳类字段"的改动还没写盘
 
 	hostTTL   time.Duration // 主机 cookie 有效期（滑动）
 	guestTTL  time.Duration // 访客 cookie 有效期（滑动）
@@ -144,15 +134,12 @@ func NewAuth(secretPath string, trustLoopback bool, hostTTL, guestTTL, inviteTTL
 		secret:        secret,
 		hostKey:       randomToken(hostKeyLen),
 		trustLoopback: trustLoopback,
-		statePath:     filepath.Join(filepath.Dir(secretPath), "auth-state.json"),
 		hostTTL:       hostTTL,
 		guestTTL:      guestTTL,
 		inviteTTL:     inviteTTL,
 		invites:       make(map[string]*Invite),
 		seen:          make(map[string]*SeenDevice),
 	}
-	auth.loadState()
-	go auth.flushLoop()
 	return auth, nil
 }
 
@@ -199,8 +186,7 @@ func (a *Auth) RedeemHostKey(key string) bool {
 /* ---------------- 邀请码 ---------------- */
 
 // CreateInvite 生成一张一次性邀请链接（A 方案：谁先点谁绑定，转发无效）。
-// advanced 为 true 表示这张邀请码带「高级权限」（可触发 Codex）。
-func (a *Auth) CreateInvite(note string, advanced bool) Invite {
+func (a *Auth) CreateInvite(note string) Invite {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cleanupLocked()
@@ -209,13 +195,11 @@ func (a *Auth) CreateInvite(note string, advanced bool) Invite {
 	invite := &Invite{
 		ID:        randomToken(hostKeyLen),
 		Note:      cleanName(note),
-		Advanced:  advanced,
 		CreatedAt: now.UnixMilli(),
 		ExpiresAt: now.Add(a.inviteTTL).UnixMilli(),
 		Status:    statusPending,
 	}
 	a.invites[invite.ID] = invite
-	a.saveLocked()
 	return *invite
 }
 
@@ -245,7 +229,6 @@ func (a *Auth) RevokeInvite(id string) bool {
 	}
 	invite.Revoked = true
 	invite.Status = statusRevoked
-	a.saveLocked()
 	return true
 }
 
@@ -288,12 +271,8 @@ func (a *Auth) RedeemInvite(code, ip, ua string) (Identity, string) {
 	invite.BoundUA = ua
 	invite.LastSeen = invite.UsedAt
 	invite.Status = statusUsed
-	a.saveLocked()
 
-	return Identity{
-		Role: RoleGuest, InviteID: invite.ID, PassID: invite.passID,
-		Advanced: invite.Advanced, IP: ip, UA: ua,
-	}, ""
+	return Identity{Role: RoleGuest, InviteID: invite.ID, PassID: invite.passID, IP: ip, UA: ua}, ""
 }
 
 /* ---------------- 身份判定与 cookie ---------------- */
@@ -319,10 +298,7 @@ func (a *Auth) IdentityOf(w http.ResponseWriter, r *http.Request) Identity {
 	if payload, ok := a.readCookie(r, cookieGuest); ok {
 		if now.Sub(time.UnixMilli(payload.issuedAt)) <= a.guestTTL {
 			if invite := a.inviteFor(payload.inviteID, payload.passID); invite != nil {
-				id := Identity{
-					Role: RoleGuest, InviteID: invite.ID, PassID: payload.passID,
-					Advanced: invite.Advanced, IP: ip, UA: ua,
-				}
+				id := Identity{Role: RoleGuest, InviteID: invite.ID, PassID: payload.passID, IP: ip, UA: ua}
 				a.touch(id)
 				if w != nil && now.Sub(time.UnixMilli(payload.issuedAt)) > renewAfter {
 					a.setCookie(w, r, cookieGuest, a.guestTTL, cookiePayload{
@@ -440,7 +416,6 @@ func (a *Auth) inviteFor(inviteID, passID string) *Invite {
 	}
 	invite.LastSeen = time.Now().UnixMilli()
 	invite.Status = statusUsed
-	a.dirty = true // 心跳类改动：攒着由 flushLoop 定时写盘，别每个请求都写文件
 	out := *invite
 	return &out
 }
@@ -460,7 +435,7 @@ func (a *Auth) touch(id Identity) {
 	now := time.Now().UnixMilli()
 	entry, ok := a.seen[key]
 	if !ok {
-		entry = &SeenDevice{Key: key, Role: id.Role, Advanced: id.Advanced, FirstAt: now}
+		entry = &SeenDevice{Key: key, Role: id.Role, FirstAt: now}
 		a.seen[key] = entry
 		// 访客记录跟着邀请码的状态走
 		if invite := a.invites[id.InviteID]; invite != nil {
@@ -470,11 +445,9 @@ func (a *Auth) touch(id Identity) {
 		}
 	}
 	entry.Role = id.Role
-	entry.Advanced = id.Advanced
 	entry.IP = id.IP
 	entry.UA = id.UA
 	entry.LastAt = now
-	a.dirty = true // 心跳类改动，交给 flushLoop 定时落盘
 }
 
 // SetDeviceName 在浏览器上报昵称后更新设备记录。
@@ -486,7 +459,6 @@ func (a *Auth) SetDeviceName(deviceKey, name string) {
 	defer a.mu.Unlock()
 	if entry, ok := a.seen[deviceKey]; ok {
 		entry.Name = name
-		a.dirty = true
 	}
 }
 
@@ -531,13 +503,6 @@ func (a *Auth) cleanupLocked() {
 	for id, invite := range a.invites {
 		if invite.UsedAt == 0 && !invite.Revoked && now > invite.ExpiresAt {
 			delete(a.invites, id)
-			a.dirty = true
-			continue
-		}
-		// 已绑定的设备：凭证早过了（3 倍 cookie 有效期），记录就没必要留着
-		if invite.UsedAt > 0 && now-invite.LastSeen > int64(3*a.guestTTL/time.Millisecond) {
-			delete(a.invites, id)
-			a.dirty = true
 		}
 	}
 	// 设备记录最多保留 200 条
@@ -597,131 +562,6 @@ func requestIsHTTPS(r *http.Request) bool {
 		return true
 	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-}
-
-/* ---------------- 持久化 ---------------- */
-
-// 为什么邀请码/设备记录必须落盘：它们原来只活在内存里，服务一重启 invites 就空了，
-// 于是 inviteFor() 判定"邀请码不存在" → 所有访客 cookie 立刻失效，每台手机都得重新扫码。
-// 签名密钥本来就落盘（cookie 能跨重启），邀请码不落盘等于白搭。
-type authStateFile struct {
-	Version int               `json:"version"`
-	Invites []persistedInvite `json:"invites"`
-	Seen    []SeenDevice      `json:"seen"`
-}
-
-// persistedInvite 是 Invite 的可持久化形态：把只在服务端用的 passID（访客凭证）也写进去，
-// 否则重启后认不出"这台手机是哪个访客"。
-type persistedInvite struct {
-	ID        string `json:"id"`
-	Note      string `json:"note"`
-	Advanced  bool   `json:"advanced"`
-	CreatedAt int64  `json:"createdAt"`
-	ExpiresAt int64  `json:"expiresAt"`
-	UsedAt    int64  `json:"usedAt,omitempty"`
-	Revoked   bool   `json:"revoked,omitempty"`
-	BoundIP   string `json:"boundIp,omitempty"`
-	BoundUA   string `json:"boundUa,omitempty"`
-	LastSeen  int64  `json:"lastSeen,omitempty"`
-	PassID    string `json:"passId,omitempty"`
-}
-
-// loadState 读取上次落盘的邀请码与设备记录（文件不存在就当作第一次运行）。
-func (a *Auth) loadState() {
-	raw, err := os.ReadFile(a.statePath)
-	if err != nil {
-		return
-	}
-	var state authStateFile
-	if err := json.Unmarshal(raw, &state); err != nil {
-		log.Printf("认证状态读取失败（忽略，按空状态启动）：%v", err)
-		return
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, it := range state.Invites {
-		if it.ID == "" {
-			continue
-		}
-		invite := &Invite{
-			ID: it.ID, Note: it.Note, Advanced: it.Advanced,
-			CreatedAt: it.CreatedAt, ExpiresAt: it.ExpiresAt,
-			UsedAt: it.UsedAt, Revoked: it.Revoked,
-			BoundIP: it.BoundIP, BoundUA: it.BoundUA, LastSeen: it.LastSeen,
-			passID: it.PassID,
-		}
-		invite.Status = a.statusLocked(invite)
-		a.invites[invite.ID] = invite
-	}
-	for _, dev := range state.Seen {
-		if dev.Key == "" {
-			continue
-		}
-		entry := dev
-		a.seen[entry.Key] = &entry
-	}
-
-	bound := 0
-	for _, invite := range a.invites {
-		if invite.passID != "" && !invite.Revoked {
-			bound++
-		}
-	}
-	if bound > 0 {
-		log.Printf("认证状态：已恢复 %d 个已绑定设备（%s），它们不用重新扫码", bound, a.statePath)
-	}
-}
-
-// saveLocked 原子写盘（先写临时文件再改名）；调用方必须已持有 a.mu。
-func (a *Auth) saveLocked() {
-	a.dirty = false
-	state := authStateFile{Version: 1}
-	for _, invite := range a.invites {
-		state.Invites = append(state.Invites, persistedInvite{
-			ID: invite.ID, Note: invite.Note, Advanced: invite.Advanced,
-			CreatedAt: invite.CreatedAt, ExpiresAt: invite.ExpiresAt,
-			UsedAt: invite.UsedAt, Revoked: invite.Revoked,
-			BoundIP: invite.BoundIP, BoundUA: invite.BoundUA, LastSeen: invite.LastSeen,
-			PassID: invite.passID,
-		})
-	}
-	for _, entry := range a.seen {
-		state.Seen = append(state.Seen, *entry)
-	}
-	raw, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		a.dirty = true
-		log.Printf("认证状态序列化失败：%v", err)
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(a.statePath), 0o755); err != nil {
-		a.dirty = true
-		return
-	}
-	tmp := a.statePath + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
-		a.dirty = true
-		log.Printf("认证状态写入失败：%v", err)
-		return
-	}
-	if err := os.Rename(tmp, a.statePath); err != nil {
-		a.dirty = true
-		log.Printf("认证状态改名失败：%v", err)
-	}
-}
-
-// flushLoop 定时把"心跳类"改动写盘（设备最近上线时间每个请求都变，不值得每请求写一次文件）。
-func (a *Auth) flushLoop() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		a.mu.Lock()
-		if a.dirty {
-			a.saveLocked()
-		}
-		a.mu.Unlock()
-	}
 }
 
 // randomToken 生成 n 字节随机数的十六进制串。

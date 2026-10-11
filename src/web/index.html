@@ -49,13 +49,6 @@
           </svg>
           <span>链接</span>
         </button>
-        <button type="button" class="top-btn" id="consoleBtn" title="Codex 控制台：查看执行过程、终止任务" hidden>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M7 9l3 3-3 3M13 15h4" />
-          </svg>
-          <span>控制台</span>
-        </button>
         <button type="button" class="user-btn" id="userBtn" title="点击修改昵称">
           <span class="avatar" id="userAvatar">我</span>
           <span id="userName">我的设备</span>
@@ -89,9 +82,6 @@
         <div class="messages" id="messages"></div>
         <div class="upload-tray" id="uploadTray" hidden></div>
         <form class="composer" id="composer">
-          <div class="composer-quick" id="composerQuick" hidden>
-            <button type="button" class="quick-chip" id="codexChip" title="插入 @Codex，让聊天室里的 Codex 回答">@Codex</button>
-          </div>
           <div class="composer-box">
             <button type="button" class="icon-btn" id="attachBtn" title="选择文件">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -126,10 +116,6 @@
         <h3>扫码加入</h3>
         <button type="button" class="modal-close" data-close aria-label="关闭">×</button>
       </div>
-      <label class="check-row">
-        <input type="checkbox" id="qrAdvanced" />
-        <span>允许对方使用 Codex（高级权限）</span>
-      </label>
       <div class="qr-box" id="qrBox"></div>
       <p class="qr-url" id="qrUrl"></p>
       <p class="qr-state" id="qrState"></p>
@@ -201,10 +187,6 @@
           <input class="link-input" id="inviteNote" placeholder="备注，例如「张三」" maxlength="16" />
           <button type="button" class="btn-primary" id="inviteCreate">生成邀请</button>
         </div>
-        <label class="check-row">
-          <input type="checkbox" id="inviteAdvanced" />
-          <span>高级权限：对方可触发聊天室里的 Codex</span>
-        </label>
         <p class="modal-tip">谁先打开就绑定谁，链接转发给别人打不开；撤销后对方立刻被挡在门外。</p>
         <ul class="invite-list" id="inviteList"></ul>
       </section>
